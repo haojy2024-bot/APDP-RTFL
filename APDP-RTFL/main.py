@@ -1,0 +1,653 @@
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import kurtosis, skew, entropy
+from data_utils import load_and_preprocess_data, split_data_for_clients
+from fl_client import FLClient
+from fl_server import FLServer
+import charting as charts
+from sklearn.model_selection import train_test_split
+
+# 新增：动态隐私预算配置
+TOTAL_PRIVACY_BUDGET = 5.0 # 总隐私预算
+MIN_EPSILON = 0.1 # 最小隐私预算
+MAX_EPSILON = 2.0 # 最大隐私预算
+PRIVACY_ALLOCATION_STRATEGY = "hybrid" # 分配策略：uniform, data_quality, hybrid
+
+NUM_CLIENTS = 5
+NUM_ROUNDS = 20
+CLIENT_EPOCHS = 3
+BASE_LEARNING_RATE = 0.01
+DP_EPSILON = 1.0 # 默认值，会被动态分配覆盖
+DP_DELTA = 1e-5
+DP_L2_NORM_CLIP = 1.0
+EARLYSTOP_PATIENCE = 3
+
+# 隐私预算分配器
+class PrivacyBudgetAllocator:
+    def __init__(self, total_budget, strategy="hybrid"):
+        self.total_budget = total_budget
+        self.strategy = strategy
+        self.clients_statistics = {} # 存储客户端统计信息；历史记录
+        self.last_round_contributions = {} # 上一轮动态贡献
+    # 计算数据质量分数（基于类别分布的熵）
+    def compute_data_quality_score(self, y_data):
+        if y_data is None or len(y_data) == 0:
+            return 0.0  
+        # 计算类别分布
+        unique, counts = np.unique(y_data, return_counts=True)
+        probabilities = counts / len(y_data)
+        # 计算熵（熵值越高表示数据分布越均匀，质量越好）
+        data_entropy = entropy(probabilities)
+        max_entropy = np.log(len(unique)) if len(unique) > 0 else 1.0
+        normalized_entropy = data_entropy / max_entropy if max_entropy > 0 else 0.0
+        return normalized_entropy
+    # 为活跃客户分配隐私预算
+    def allocate_budget(self, clients, active_client_indices):
+        if not active_client_indices:
+            return []
+        n_active = len (active_client_indices)
+        # 均匀分配
+        if self.strategy == "uniform":
+            epsilon_per_client = self.total_budget / n_active
+            return {client_id: epsilon_per_client for client_id in active_client_indices}
+        # 基于数据量分配
+        elif self.strategy == "data-size":
+            total_data = sum(len(clients[i]. y_train) for i in active_client_indices)
+            if total_data == 0:
+                epsilon_per_client = self.total_budget / n_active
+                return {client_id: epsilon_per_client for client_id in active_client_indices}
+            allocations = {}
+            for i in active_client_indices:
+                data_weight = len(clients[i]. y_train) / total_data
+                allocations[i] = self.total_budget * data_weight
+            return allocations
+        #基于数据质量分配
+        elif self.strategy == "data_quality":
+            quality_scores = {}
+            total_quality = 0.0
+            for i in active_client_indices:
+                quality = self.compute_data_quality_score(clients[i]. y_train)
+                quality_scores[i] = quality
+                total_quality += quality
+            if total_quality == 0:
+                epsilon_per_client = self.total_budget / n_active
+                return {client_id: epsilon_per_client for client_id in active_client_indices}
+            allocations = {}
+            for i in active_client_indices:
+                quality_weight = quality_scores[i] / total_quality
+                allocations[i] = self.total_budget * quality_weight
+            return allocations
+        # 混合分配：结合数据量和数据质量
+        elif self.strategy == "hybrid":
+            total_data = sum(len(clients[i].y_train) for i in active_client_indices)
+            if total_data == 0:
+                epsilon_per_client = self.total_budget / n_active
+                return {client_id: epsilon_per_client for client_id in active_client_indices}
+
+            # 新增：计算算力补偿因子（低算力→更高权重→更高隐私预算）
+            total_compute_factor = 0.0
+            compute_factors = {}
+            for i in active_client_indices:
+                cap = getattr(clients[i], 'compute_capability', 1.0)
+                # 低算力→获得更高权重（补偿→更高隐私预算）
+                compute_factor = 1.0 / (cap + 0.01)
+                compute_factors[i] = compute_factor
+                total_compute_factor += compute_factor
+
+            allocations = {}
+            total_weight = 0.0
+            for i in active_client_indices:
+                # 数据量权重（70%）
+                data_weight = len(clients[i].y_train) / total_data
+                # 数据质量权重（30%）
+                quality = self.compute_data_quality_score(clients[i].y_train)
+                # 定义compute_weight
+                compute_weight = (
+                    compute_factors[i] / total_compute_factor
+                    if total_compute_factor > 0 else 0.0
+                )
+                # 组合权重
+                weight = 0.50 * data_weight + 0.25 * quality + 0.25 * compute_weight
+                allocations[i] = weight
+                total_weight += weight
+            # 归一化并分配预算
+            if total_weight > 0:
+                for i in allocations:
+                    allocations[i] = (allocations[i] / total_weight) * self.total_budget
+            else:
+                epsilon_per_client = self.total_budget / n_active
+                for i in active_client_indices:
+                    allocations[i] = epsilon_per_client
+            return allocations
+        else:
+            raise ValueError(f"Invalid strategy: {self.strategy}")
+
+    # 每轮训练结束后，更新上一轮贡献记录
+    def update_contributions(self, round_num, client_contributions):
+        self.last_round_contributions = client_contributions.copy()
+
+    # 基于历史表现自适应调整隐私预算
+    def adaptive_adjustment(self, clients, previous_allocations, round_num):
+        if round_num < 2:  # 至少需要两轮数据才能调整
+            return previous_allocations.copy()
+        # 简单的调整策略： 基于客户端的历史贡献
+        new_allocations = previous_allocations.copy()
+        contributions = self.last_round_contributions # 使用上一轮贡献
+        if not hasattr(self, 'clients_statistics') or not isinstance(self.clients_statistics, dict):
+            self.clients_statistics = {}
+        for i, epsilon in previous_allocations.items():
+            if i not in self.clients_statistics:
+                self.clients_statistics[i] = {
+                    'contribution_history': [],
+                    'data_quality_history': [],
+                    'epsilon_history': []
+                }
+            # 获取上一轮贡献（优先使用复合指标）
+            contrib = contributions.get(i, 0.0)
+            if isinstance(contrib, (list, tuple)) and len(contrib) >=3:
+                update_norm, acc_gain, loss_drop = contrib
+                # 综合贡献分数（可调整权重）
+                contribution_score = 0.5 * update_norm + 0.3 * acc_gain + 0.2 * loss_drop
+            else:
+                contribution_score = float(contrib) if contrib else 0.0
+            # 计算客户端贡献（基于数据量和质量）
+            data_size = len(clients[i].y_train) if hasattr(clients[i], 'y_train') else 0
+            data_quality = self.compute_data_quality_score(clients[i].y_train) if hasattr(clients[i],
+                                                                                          'y_train') else 0.5
+            contribution_score = data_size * data_quality
+            # 更新统计信息
+            self.clients_statistics[i]['contribution_history'].append(contribution_score)
+            self.clients_statistics[i]['data_quality_history'].append(data_quality)
+            self.clients_statistics[i]['epsilon_history'].append(epsilon)
+            # 基于历史表现调整
+            if len(self.clients_statistics[i]['contribution_history']) > 1:
+                recent_avg = np.mean(self.clients_statistics[i]['contribution_history'][-3:])
+                all_recent = [np.mean(s['contribution_history'][-3:])
+                              for s in self.clients_statistics.values()
+                              if len(s['contribution_history']) >= 3]
+                global_avg = np.mean(all_recent) if all_recent else recent_avg
+                if recent_avg > global_avg * 1.05: # 贡献显著高于平均
+                    new_allocations[i] = min(MAX_EPSILON, epsilon * 1.25)
+                else: # 贡献显著低于平均
+                    new_allocations[i] = max(MIN_EPSILON, epsilon * 0.75)
+        # 确保总预算不变
+        total_allocated = sum(new_allocations.values())
+        if total_allocated > 0:
+            scaling = self.total_budget / total_allocated
+            for i in new_allocations:
+                new_allocations[i] = max(MIN_EPSILON, min(MAX_EPSILON,new_allocations[i] * scaling))
+        return new_allocations
+
+class HeterogeneousComputeAdapter:
+    """异构算力适配模块：处理设备计算能力差异"""
+    def __init__(self, capabilities=None):
+        # capabilities: dict {client_idx: relative_speed (0.2~1.0)}
+        self.capabilities = capabilities or {}
+        self.min_cap_threshold = 0.3  # 低于此阈值视为极低算力
+
+    def assign_capabilities(self, num_clients):
+        # 模拟真实跨设备分布：高、中、低算力
+        default_dist = [1.0, 0.85, 0.65, 0.40, 0.25][:num_clients]
+        if len(default_dist) < num_clients:
+            default_dist += [0.5] * (num_clients - len(default_dist))
+        self.capabilities = {i: default_dist[i] for i in range(num_clients)}
+        return self.capabilities
+
+    def get_effective_epochs(self, client_idx, base_epochs):
+        """根据算力动态降低本地训练轮次（主计算开销来源）"""
+        cap = self.capabilities.get(client_idx, 1.0)
+        effective = max(1, int(base_epochs * cap * 1.1))  # 轻微上浮避免过低
+        return effective
+
+    def adjust_epsilon_for_compute(self, base_epsilon, client_idx):
+        """低算力设备 → 更高epsilon（更弱隐私、更小噪声量，降低加噪开销）"""
+        cap = self.capabilities.get(client_idx, 1.0)
+        if cap < self.min_cap_threshold:
+            return MAX_EPSILON  # 极低算力几乎不加噪声
+        # 线性映射：算力越低 → epsilon越高
+        adjustment = 1.0 + (1.0 - cap) * 0.8
+        new_eps = base_epsilon * adjustment
+        return min(MAX_EPSILON, max(MIN_EPSILON, new_eps))
+
+def main():
+    print("Starting RTFL Simulation with Differential Privacy...")
+    print(f"Total Privacy Budget: {TOTAL_PRIVACY_BUDGET}")
+    print(f"Allocation Strategy: {PRIVACY_ALLOCATION_STRATEGY}")
+    print(f"DP Parameters: Epsilon={DP_EPSILON}, Delta={DP_DELTA}, L2_Norm_Clip={DP_L2_NORM_CLIP}")
+    # 初始化隐私预算分配器
+    privacy_allocator = PrivacyBudgetAllocator(TOTAL_PRIVACY_BUDGET, PRIVACY_ALLOCATION_STRATEGY)
+
+    X_train_full, y_train_full, X_test, y_test, feature_names = load_and_preprocess_data()
+    if X_train_full is None:
+        print("Failed to load data. Exiting.")
+        return
+    num_features = X_train_full.shape[1]
+    print(f"Data loaded: {X_train_full.shape[0]} train samples, {X_test.shape[0]} test samples. Num features: {num_features}")
+    client_datasets = split_data_for_clients(X_train_full,
+        y_train_full,
+        NUM_CLIENTS,
+        size_ratios=[0.35, 0.25, 0.18, 0.12, 0.10],
+        stratified=True)
+    clients = []
+    client_ids = [f"client_{i}" for i in range(NUM_CLIENTS)]
+    # 显示客户端数据分布信息
+    print("\nClient Data Distribution:")
+    for i in range(NUM_CLIENTS):
+        X_c, y_c = client_datasets[i]
+        unique, counts = np.unique(y_c, return_counts=True) if len(y_c) > 0 else ([], [])
+        distribution = dict(zip(unique, counts)) if len(unique) > 0 else {}
+        data_quality = privacy_allocator.compute_data_quality_score(y_c)
+        print(f"Client {i}: Data size={len(y_c)}, Classes={len(unique)}, Data quality={data_quality: .3f}")
+
+    # Split each client's data into train/val
+    client_val_sets = []
+    for i in range(NUM_CLIENTS):
+        X_c, y_c = client_datasets[i]
+        if X_c.shape[0] > 5:
+            X_c_train, X_c_val, y_c_train, y_c_val = train_test_split(X_c, y_c, test_size=0.2, random_state=i)
+        else:
+            X_c_train, y_c_train = X_c, y_c
+            X_c_val, y_c_val = None, None
+        # 使用默认隐私预算初始化客户端，后续会动态调整
+        clients.append(FLClient(client_ids[i], X_c_train, y_c_train, num_features, 
+                                learning_rate=BASE_LEARNING_RATE,
+                                dp_epsilon=DP_EPSILON, # 初始值，会被动态覆盖
+                                dp_delta=DP_DELTA, 
+                                dp_l2_norm_clip=DP_L2_NORM_CLIP,
+                                random_state=i,
+                                X_val=X_c_val, y_val=y_c_val, earlystop_patience=EARLYSTOP_PATIENCE))
+        client_val_sets.append((X_c_val, y_c_val))
+    # 新增：异构算力适配器
+    compute_adapter = HeterogeneousComputeAdapter()
+    # 为所有客户端分配计算能力（可以自定义，也可以随机模拟）
+    capabilities = compute_adapter.assign_capabilities(NUM_CLIENTS)
+    # 将计算能力绑定到每个客户端对象上
+    print("\n=== Client Compute Capabilities ===")
+    for i, client in enumerate(clients):
+        client.compute_capability = capabilities.get(i,1.0)
+        data_size = len(client.y_train) if hasattr(client, 'y_train') else 0
+        print(f"Client {i:2d} ({client.client_id}):"
+              f"data_size = {data_size:4d},"
+              f"compute_capability = {client.compute_capability:3f}")
+    print(f"Compute capability distribution: {list(capabilities.values())}")
+    print("=======================================\n")
+
+
+    # For server validation, concatenate all client val sets
+    X_val_server = np.concatenate([v[0] for v in client_val_sets if v[0] is not None]) if any(v[0] is not None for v in client_val_sets) else None
+    y_val_server = np.concatenate([v[1] for v in client_val_sets if v[1] is not None]) if any(v[1] is not None for v in client_val_sets) else None
+    server_id = "main_server"
+    server = FLServer(server_id, client_ids, num_features, X_val=X_val_server, y_val=y_val_server, earlystop_patience=EARLYSTOP_PATIENCE)
+    initial_params_for_ebcd = [client.model_parameters() for client in clients if client.X_train.shape[0] > 0]
+    if initial_params_for_ebcd:
+        server.ebcd.establish_baseline(initial_params_for_ebcd)
+
+    # --- Metrics storage ---
+    rounds = []
+    accuracies = []
+    f1_scores = []
+    aucs = []
+    ebcd_variances = []
+    ebcd_kurtoses = []
+    ebcd_skewnesses = []
+    server_statuses = []
+    coordinator_ids = []
+    dp_noise_scales = []
+    agg_client_counts = []
+    zkip_failures = []
+    delta_norms = []
+    ebcd_alerts = []
+    tcm_counts = []
+
+    # 隐私预算相关指标
+    privacy_budget_allocations = [] # 每轮的隐私预算分配
+    client_data_qualities = [] # 客户端数据质量
+    client_contribution_scores = [] # 客户端贡献分数
+
+    # Per-client metrics: [round][client]
+    per_client_update_norms = []
+    per_client_ebcd_stats = []
+    per_client_zkip_status = []
+    per_client_epsilon = []
+
+    # 第一轮隐私预算分配
+    active_client_indices = list(range(len(clients)))
+    initial_epsilon_allocations = privacy_allocator.allocate_budget(clients, active_client_indices)
+    current_epsilon_allocations = initial_epsilon_allocations.copy()
+
+    for round_num in range(1, NUM_ROUNDS + 1):
+        print(f"\n--- Round {round_num}/{NUM_ROUNDS} ---")
+        start_time = time.time()
+        # 动态调整隐私预算（从第二轮开始）
+        if round_num > 1:
+            current_epsilon_allocations = privacy_allocator.adaptive_adjustment(clients, current_epsilon_allocations,
+                                                                                round_num)
+        print(f"Privacy Budget Allocation: {current_epsilon_allocations}")
+
+        global_params_for_round = server.get_global_model_parameters_for_clients()
+        if global_params_for_round is None:
+            print(f"Round {round_num}: Critical - Could not get model from coordinator. Attempting TCM recovery.")
+            latest_tcm_entry = server.tcm.get_latest_state_info()
+            if latest_tcm_entry:
+                recovered_params, _ = server.tcm.recover_state_by_round(latest_tcm_entry[1]) 
+                if recovered_params:
+                    server.global_model_parameters = recovered_params
+                    global_params_for_round = server.get_global_model_parameters_for_clients() 
+                    print(f"Round {round_num}: Recovered model from TCM (Round {latest_tcm_entry[1]}).")
+                else:
+                    print(f"Round {round_num}: TCM recovery failed. Skipping round.")
+                    continue
+            else:
+                 print(f"Round {round_num}: No TCM entries to recover from. Skipping round.")
+                 continue
+        client_deltas_with_proofs = []
+        client_data_sizes_for_agg = []
+        active_clients_this_round_ids = []
+        # --- DP noise scale for this round (all clients, average) ---
+        round_noise_scales = []
+        round_zkip_failures = 0
+        round_delta_norm = 0.0
+        round_ebcd_alert = 0
+        round_client_update_norms = []
+        round_client_ebcd_stats = []
+        round_client_zkip_status = []
+        round_client_epsilon_list = [] # 本轮每个客户端的隐私预算
+        for idx, client in enumerate(clients):
+            if client.simulate_failure(probability=0.15): 
+                round_client_update_norms.append(None)
+                round_client_ebcd_stats.append((None, None, None))
+                round_client_zkip_status.append(None)
+                continue 
+            active_clients_this_round_ids.append(client.client_id)
+
+            # 设置动态隐私预算
+            client_epsilon  = current_epsilon_allocations.get(idx, DP_EPSILON)
+            # 新增：根据算力进一步调整epsilon和epochs
+            adjusted_epsilon = compute_adapter.adjust_epsilon_for_compute(client_epsilon, idx)
+            effective_epochs = compute_adapter.get_effective_epochs(idx, CLIENT_EPOCHS)
+
+            client.dp_epsilon = max(MIN_EPSILON, min(MAX_EPSILON, adjusted_epsilon))
+            round_client_epsilon_list.append(client.dp_epsilon)
+
+            # 打印观察效果
+            print(f"Client {idx} ({client.client_id}):"
+                  f"cap={getattr(client, 'compute_capability', 1.0):.2f},"
+                  f"effective_epochs={effective_epochs}, ε={client.dp_epsilon:.3f}")
+
+            client.set_global_model_parameters(global_params_for_round)
+            # 使用动态的本地训练轮次
+            delta_weights, proof = client.train(epochs=effective_epochs)
+            # ZKIP proof check (simulate server-side check)
+            if delta_weights is not None and proof is not None:
+                from zkip import ZeroKnowledgeIntegrityProofs
+                zkip = ZeroKnowledgeIntegrityProofs()
+                zkip_status = zkip.verify_proof(delta_weights, proof)
+                round_client_zkip_status.append(zkip_status)
+                # Delta norm (L2)
+                norm = 0.0
+                for v in delta_weights.values():
+                    norm += np.linalg.norm(v.flatten())**2
+                update_norm = np.sqrt(norm)
+                round_client_update_norms.append(update_norm)
+                # Per-client EBCD stats (variance, kurtosis, skewness) for delta_weights['coef_']
+                if 'coef_' in delta_weights and hasattr(delta_weights['coef_'], 'flatten'):
+                    flat = delta_weights['coef_'].flatten()
+                    v = np.var(flat)
+                    k = kurtosis(flat, fisher=True)
+                    s = skew(flat)
+                    round_client_ebcd_stats.append((v, k, s))
+                else:
+                    round_client_ebcd_stats.append((None, None, None))
+                if not zkip_status:
+                    round_zkip_failures += 1
+                round_delta_norm += update_norm
+                client_deltas_with_proofs.append((delta_weights, proof, client.client_id))
+                client_data_sizes_for_agg.append(len(client.y_train))
+                # DP noise scale: (client.dp_l2_norm_clip * np.sqrt(2 * np.log(1.25 / client.dp_delta))) / client.dp_epsilon
+                if client.dp_epsilon > 0:
+                    noise_stddev = (client.dp_l2_norm_clip * np.sqrt(2 * np.log(1.25 / client.dp_delta))) / client.dp_epsilon
+                else:
+                    noise_stddev = 0.0
+                round_noise_scales.append(noise_stddev)
+            else:
+                round_client_update_norms.append(None)
+                round_client_ebcd_stats.append((None, None, None))
+                round_client_zkip_status.append(False)
+        # Average delta norm for the round
+        if len([n for n in round_client_update_norms if n is not None]) > 0:
+            round_delta_norm = round_delta_norm / len([n for n in round_client_update_norms if n is not None])
+        else:
+            round_delta_norm = 0.0
+        per_client_update_norms.append(round_client_update_norms)
+        per_client_ebcd_stats.append(round_client_ebcd_stats)
+        per_client_zkip_status.append(round_client_zkip_status)
+        per_client_epsilon.append(round_client_epsilon_list) # 记录本轮隐私预算分配
+        server.arrp.update_active_clients(active_clients_this_round_ids)
+        aggregation_success, aggregated_from_clients = server.aggregate_model_deltas(client_deltas_with_proofs, client_data_sizes_for_agg)
+        # EBCD alert (after aggregation)
+        ebcd_alert = 1 if server.ebcd.check_for_corruption(server.global_model_parameters) else 0
+        round_ebcd_alert = ebcd_alert
+        server_state_details = {
+            'arrp_status': server.arrp.status.name,
+            'current_coordinator': server.arrp.get_current_coordinator_id(),
+            'aggregation_successful': aggregation_success,
+            'aggregated_from_clients_count': len(aggregated_from_clients),
+            'dp_epsilon': DP_EPSILON,
+            'dp_l2_norm_clip': DP_L2_NORM_CLIP
+        }
+        client_updates_summary = {cid: "OK_DP" for cid in aggregated_from_clients} 
+        for cid in active_clients_this_round_ids:
+            if cid not in client_updates_summary: client_updates_summary[cid] = "NO_UPDATE_OR_FAULTY"
+        server.tcm.record_state(round_num, server.global_model_parameters, server_state_details, client_updates_summary)
+        metrics = server.evaluate_global_model(X_test, y_test, round_num)
+        print(f"Round {round_num} Eval (DP): Acc={metrics.get('accuracy',0):.3f}, F1={metrics.get('f1_score',0):.3f}, AUC={metrics.get('auc_roc',0):.3f}")
+        round_duration = time.time() - start_time
+        print(f"Round {round_num} duration: {round_duration:.2f}s. Coordinator: {server.arrp.get_current_coordinator_id()}")
+        # --- Metrics collection ---
+        rounds.append(round_num)
+        accuracies.append(metrics.get('accuracy', 0))
+        f1_scores.append(metrics.get('f1_score', 0))
+        aucs.append(metrics.get('auc_roc', 0))
+        agg_client_counts.append(len(aggregated_from_clients))
+        server_statuses.append(server.arrp.status.name)
+        coordinator_ids.append(server.arrp.get_current_coordinator_id())
+        dp_noise_scales.append(np.mean(round_noise_scales) if round_noise_scales else 0.0)
+        zkip_failures.append(round_zkip_failures)
+        delta_norms.append(round_delta_norm)
+        ebcd_alerts.append(round_ebcd_alert)
+        tcm_counts.append(len(server.tcm.manifold_log))
+
+        # 计算本轮每个客户端的动态贡献指标
+        client_contributions = {}
+        for idx, client in enumerate(clients):
+            update_norm = round_client_update_norms[idx] if idx < len(round_client_update_norms) and round_client_update_norms[idx] is not None else 0.0
+            # 本地验证准确率提升（当前版本可能还没有记录，先用0.0占位）
+            acc_gain = getattr(client, 'last_val_acc_gain', 0.0)
+            # 验证随时下降幅度（loss_drop = before - after, 越大越好）
+            loss_drop = getattr(client, 'last_val_loss_drop', 0.0)
+            client_contributions[idx] = (update_norm, acc_gain, loss_drop)
+        # 更新allocator 的上一轮贡献记录
+        privacy_allocator.update_contributions(round_num, client_contributions)
+        # 记录隐私预算分配
+        privacy_budget_allocations.append(current_epsilon_allocations.copy())
+
+        # EBCD stats (variance, kurtosis, skewness) for global model coef_
+        coef = server.global_model_parameters['coef_']
+        if coef is not None and hasattr(coef, 'flatten'):
+            flat = coef.flatten()
+            ebcd_variances.append(np.var(flat))
+            ebcd_kurtoses.append(kurtosis(flat, fisher=True))
+            ebcd_skewnesses.append(skew(flat))
+        else:
+            ebcd_variances.append(0)
+            ebcd_kurtoses.append(0)
+            ebcd_skewnesses.append(0)
+
+    print("\n--- RTFL Simulation with DP Complete ---")
+    print(f"Total states recorded by TCM: {len(server.tcm.manifold_log)}")
+    print(f"Pravacy allocation strategy: {PRIVACY_ALLOCATION_STRATEGY}")
+    print(f"Fianl privacy budget allocations: {current_epsilon_allocations}")
+
+    if NUM_ROUNDS >= 3:
+        target_recovery_round = NUM_ROUNDS // 2
+        print(f"\nAttempting to recover model state from TCM for round {target_recovery_round}...")
+        recovered_model_params, rec_info = server.tcm.recover_state_by_round(target_recovery_round)
+        if recovered_model_params:
+            print(f"Successfully recovered (noisy) model parameters for round {target_recovery_round}.")
+        else:
+            print(f"Failed to recover model for round {target_recovery_round}.")
+    # --- Save per-client metrics as .npy for research ---
+    np.save('per_client_update_norms.npy', np.array(per_client_update_norms, dtype=object))
+    np.save('per_client_ebcd_stats.npy', np.array(per_client_ebcd_stats, dtype=object))
+    np.save('per_client_zkip_status.npy', np.array(per_client_zkip_status, dtype=object))
+    np.save('per_client_epsilon.npy', np.array(per_client_epsilon, dtype=object)) # 保存隐私预算分配
+    # --- Save plots for research ---
+    charts.plot_global_metrics(rounds, accuracies, f1_scores, aucs)
+    plt.savefig('global_metrics.png')
+    plt.close()
+    charts.plot_ebcd_stats(rounds, ebcd_variances, ebcd_kurtoses, ebcd_skewnesses)
+    plt.savefig('ebcd_stats.png')
+    plt.close()
+    # For server status, encode status as int for plotting
+    status_map = {s: i for i, s in enumerate(sorted(set(server_statuses)))}
+    status_ints = [status_map[s] for s in server_statuses]
+    charts.plot_server_status(rounds, status_ints, coordinator_ids)
+    plt.savefig('server_status.png')
+    plt.close()
+    charts.plot_dp_noise_scale(rounds, dp_noise_scales)
+    plt.savefig('dp_noise_scale.png')
+    plt.close()
+    charts.plot_agg_client_counts(rounds, agg_client_counts)
+    plt.savefig('agg_client_counts.png')
+    plt.close()
+    charts.plot_zkip_failures(rounds, zkip_failures)
+    plt.savefig('zkip_failures.png')
+    plt.close()
+    charts.plot_delta_norm(rounds, delta_norms)
+    plt.savefig('delta_norm.png')
+    plt.close()
+    charts.plot_ebcd_alerts(rounds, ebcd_alerts)
+    plt.savefig('ebcd_alerts.png')
+    plt.close()
+    charts.plot_tcm_state_count(rounds, tcm_counts)
+    plt.savefig('tcm_state_count.png')
+    plt.close()
+
+    # 隐私预算分配可视化
+    def plot_privacy_budget_allocation(rounds, privacy_allocations, client_ids): #绘制隐私预算分配图
+        plt.figure(figsize=[12, 8])
+        # 准备数据
+        n_clients = len(client_ids)
+        client_epsilon_history = [[] for _ in range(n_clients)]
+        for round_alloc in privacy_allocations:
+            for i in range(n_clients):
+                epsilon = round_alloc.get(i,0) if i in round_alloc else 0
+                client_epsilon_history[i].append(epsilon)
+        # 绘制每个客户端的隐私预算变化
+        for i in range(n_clients):
+            plt.plot(rounds, client_epsilon_history[i], marker='o', label=f'Client {i}', linewidth=2)
+
+        plt.xlabel('Round')
+        plt.ylabel('Privacy Budget (ε)')
+        plt.title(f'Dynamic Privacy Budget Allocation per Round\n'
+                  f'Strategy:{PRIVACY_ALLOCATION_STRATEGY}, TOTAL_PRIVACY_BUDGET:{TOTAL_PRIVACY_BUDGET}')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig('privacy_budget_allocation.png')
+        plt.close()
+
+    #调用隐私预算分配可视化函数
+    plot_privacy_budget_allocation(rounds, privacy_budget_allocations, client_ids)
+    # 隐私预算与数据质量关系图
+    def plot_epsilon_vs_data_quality(clients, final_allocations): # 绘制隐私预算与数据质量的关系图
+        data_qualities = []
+        epsilon_values = []
+        data_sizes = []
+        for i, client in enumerate(clients):
+            if hasattr(client, 'y_train'):
+                quality = privacy_allocator.compute_data_quality_score(client.y_train)
+                data_qualities.append(quality)
+                epsilon_values.append(final_allocations.get(i,0))
+                data_sizes.append(len(client.y_train))
+
+        plt.figure(figsize=[10, 6])
+        scatter = plt.scatter(data_qualities, epsilon_values, s=[s/10 for s in data_sizes],
+                              alpha=0.7, c=data_sizes, cmap='viridis')
+        plt.colorbar(scatter, label='Data Size')
+        plt.xlabel('Data Quality (Entropy)')
+        plt.ylabel('Final Privacy Budget (ε)')
+        plt.title('Relationship between Data Quality and Privacy Budget Allocation')
+        plt.grid(True, alpha=0.3)
+
+        # 添加趋势线
+        if len(data_qualities) > 1:
+            z = np.polyfit(data_qualities, epsilon_values, 1)
+            p = np.poly1d(z)
+            plt.plot(data_qualities, p(data_qualities), '--', color='red', alpha=0.8, label='Trend line')
+            plt.legend()
+
+        plt.tight_layout()
+        plt.savefig('epsilon_vs_data_quality.png')
+        plt.close()
+
+    plot_epsilon_vs_data_quality(clients, current_epsilon_allocations)
+
+    # --- Early stopping chart for server ---
+    if hasattr(server, 'earlystop') and hasattr(server.earlystop, 'best_metric'):
+        best_accs = []
+        for _ in rounds:
+            best_accs.append(server.earlystop.best_metric if server.earlystop.best_metric != -float('inf') else np.nan)
+        charts.plot_early_stopping_metric(rounds, best_accs, metric_name="Best Validation Accuracy", ylabel="Accuracy")
+        plt.savefig('earlystop_server_best_val_acc.png')
+        plt.close()
+    # --- Per-client plots ---
+    charts.plot_per_client_update_norms(rounds, per_client_update_norms, client_ids)
+    plt.savefig('per_client_update_norms.png')
+    plt.close()
+    # Per-client EBCD stats: variance, kurtosis, skewness
+    for stat_idx, stat_name in enumerate(['Variance', 'Kurtosis', 'Skewness']):
+        # Build [client][round] shape for plotting
+        stat_data = [[None for _ in range(len(rounds))] for _ in range(len(client_ids))]
+        for r in range(len(rounds)):
+            for c in range(len(client_ids)):
+                try:
+                    val = per_client_ebcd_stats[r][c][stat_idx] if per_client_ebcd_stats[r][c] is not None else None
+                except (IndexError, TypeError):
+                    val = None
+                stat_data[c][r] = val
+        charts.plot_per_client_ebcd_stats(rounds, stat_data, client_ids, stat_name)
+        plt.savefig(f'per_client_ebcd_{stat_name.lower()}.png')
+        plt.close()
+    charts.plot_per_client_zkip_status(rounds, per_client_zkip_status, client_ids)
+    plt.savefig('per_client_zkip_status.png')
+    plt.close()
+
+    # 每轮每个客户端的隐私预算可视化
+    def plot_per_client_epsilon(rounds, per_client_epsilon, client_ids): # 绘制每个客户端的隐私预算变化
+        plt.figure(figsize=[12, 8])
+        for client_idx in range(len(client_ids)):
+            epsilon_history = []
+            for round_idx in range(len(rounds)):
+                if (round_idx < len(per_client_epsilon) and
+                client_idx < len(per_client_epsilon[round_idx]) and
+                per_client_epsilon[round_idx][client_idx] is not None):
+                    epsilon_history.append(per_client_epsilon[round_idx][client_idx])
+                else:
+                    epsilon_history.append(np.nan)
+
+            plt.plot(rounds, epsilon_history, marker='o', label=f'Client {client_idx}, linewidth=2')
+
+        plt.xlabel('Round')
+        plt.ylabel('Privacy Budget (ε)')
+        plt.title('Per_Client Privacy Budget per Round')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('per_client_epsilon_dynamic_dp.png')
+        plt.close()
+
+    plot_per_client_epsilon(rounds, per_client_epsilon, client_ids)
+
+if __name__ == "__main__":
+    main()
