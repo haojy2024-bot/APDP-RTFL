@@ -1,4 +1,4 @@
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 import numpy as np
 from tcm import TemporalCheckpointManifold
 from zkip import ZeroKnowledgeIntegrityProofs
@@ -9,11 +9,14 @@ from sklearn.linear_model import SGDClassifier
 from earlystop import EarlyStopping
 
 class FLServer:
-    def __init__(self, server_id, client_ids, num_features, X_val=None, y_val=None, earlystop_patience=3):
+    def __init__(self, server_id, client_ids, num_features, X_val=None, y_val=None, earlystop_patience=3, classes=None):
         self.server_id = server_id
+        self.classes = np.asarray(classes if classes is not None else np.array([0, 1]), dtype=int)
+        self.n_classes = len(self.classes)
+        self.param_classes = 1 if self.n_classes <= 2 else self.n_classes
         self.global_model_parameters = {
-            'coef_': np.zeros((1, num_features)),
-            'intercept_': np.array([0.0])
+            'coef_': np.zeros((self.param_classes, num_features)),
+            'intercept_': np.zeros(self.param_classes)
         }
         self.num_features = num_features
         self.tcm = TemporalCheckpointManifold() 
@@ -56,13 +59,9 @@ class FLServer:
         # Early stopping: check validation metric (accuracy)
         if self.X_val is not None and self.y_val is not None and self.X_val.shape[0] > 0:
             eval_model = SGDClassifier(loss='log_loss')
-            eval_model.coef_ = np.zeros((1, self.num_features))
-            eval_model.intercept_ = np.array([0.0])
-            unique_y_val = np.unique(self.y_val)
-            if len(unique_y_val) >=2 :
-                eval_model.partial_fit(self.X_val[:1], self.y_val[:1], classes=np.array([0,1]))
-            elif len(unique_y_val) == 1:
-                eval_model.partial_fit(self.X_val[:1], self.y_val[:1], classes=unique_y_val)
+            eval_model.coef_ = np.zeros((self.param_classes, self.num_features))
+            eval_model.intercept_ = np.zeros(self.param_classes)
+            eval_model.partial_fit(self.X_val[:1], self.y_val[:1], classes=self.classes)
             eval_model.coef_ = np.copy(self.global_model_parameters['coef_'])
             eval_model.intercept_ = np.copy(self.global_model_parameters['intercept_'])
             try:
@@ -90,14 +89,10 @@ class FLServer:
     def evaluate_global_model(self, X_test, y_test, round_num):
         if X_test.shape[0] == 0: return {}
         eval_model = SGDClassifier(loss='log_loss')
-        eval_model.coef_ = np.zeros((1, self.num_features))
-        eval_model.intercept_ = np.array([0.0])
+        eval_model.coef_ = np.zeros((self.param_classes, self.num_features))
+        eval_model.intercept_ = np.zeros(self.param_classes)
         if X_test.shape[0] > 0 :
-            unique_y_test = np.unique(y_test)
-            if len(unique_y_test) >=2 :
-                eval_model.partial_fit(X_test[:1], y_test[:1], classes=np.array([0,1]))
-            elif len(unique_y_test) == 1:
-                 eval_model.partial_fit(X_test[:1], y_test[:1], classes=unique_y_test)
+            eval_model.partial_fit(X_test[:1], y_test[:1], classes=self.classes)
         eval_model.coef_ = np.copy(self.global_model_parameters['coef_'])
         eval_model.intercept_ = np.copy(self.global_model_parameters['intercept_'])
         try:
@@ -105,20 +100,35 @@ class FLServer:
             pred_classes = np.unique(predictions)
             y_classes = np.unique(y_test)
             print(f"[Round {round_num}] y_test classes: {y_classes}, predictions classes: {pred_classes}")
-            # F1 and AUC only meaningful if >1 class in y_test and predictions
             if len(y_classes) < 2 or len(pred_classes) < 2:
                 f1 = np.nan
+                precision = np.nan
+                recall = np.nan
                 auc_roc_val = np.nan
             else:
-                f1 = f1_score(y_test, predictions, zero_division=0)
-                if hasattr(eval_model, "predict_proba") and hasattr(eval_model, "classes_") and len(eval_model.classes_) >=2 :
-                    probas = eval_model.predict_proba(X_test)[:, 1]
-                    auc_roc_val = roc_auc_score(y_test, probas)
+                average = "binary" if self.n_classes <= 2 else "macro"
+                f1 = f1_score(y_test, predictions, average=average, zero_division=0)
+                precision = precision_score(y_test, predictions, average=average, zero_division=0)
+                recall = recall_score(y_test, predictions, average=average, zero_division=0)
+                if hasattr(eval_model, "predict_proba") and hasattr(eval_model, "classes_") and len(eval_model.classes_) >= 2:
+                    probas = eval_model.predict_proba(X_test)
+                    try:
+                        if self.n_classes <= 2:
+                            auc_roc_val = roc_auc_score(y_test, probas[:, 1])
+                        elif len(y_classes) < self.n_classes:
+                            auc_roc_val = np.nan
+                        else:
+                            auc_roc_val = roc_auc_score(y_test, probas, multi_class="ovr", average="macro", labels=self.classes)
+                    except ValueError:
+                        auc_roc_val = np.nan
                 else:
                     auc_roc_val = np.nan
             metrics = {
                 'accuracy': accuracy_score(y_test, predictions),
+                'balanced_accuracy': balanced_accuracy_score(y_test, predictions),
                 'f1_score': f1,
+                'precision': precision,
+                'recall': recall,
                 'auc_roc': auc_roc_val
             }
             return metrics

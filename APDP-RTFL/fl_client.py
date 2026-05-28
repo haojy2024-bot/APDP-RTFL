@@ -10,19 +10,21 @@ from sklearn.metrics import accuracy_score, log_loss
 class FLClient:
     def __init__(self, client_id, X_train, y_train, num_features, learning_rate=0.01,
                  dp_epsilon=1.0, dp_delta=1e-5, dp_l2_norm_clip=1.0, random_state=None,
-                 X_val=None, y_val=None, earlystop_patience=3):
+                 X_val=None, y_val=None, earlystop_patience=3, classes=None):
         self.client_id = client_id
         self.X_train = X_train
         self.y_train = y_train
+        self.classes = np.asarray(classes if classes is not None else np.unique(y_train), dtype=int)
+        if self.classes.size == 0:
+            self.classes = np.array([0, 1])
+        self.n_classes = len(self.classes)
+        self.param_classes = 1 if self.n_classes <= 2 else self.n_classes
         self.model = SGDClassifier(loss='log_loss', learning_rate='constant', eta0=learning_rate, random_state=random_state, warm_start=True)
         self.num_features = num_features
         if self.X_train.shape[0] > 0 and self.X_train.shape[1] > 0 :
-            self.model.coef_ = np.zeros((1, num_features))
-            self.model.intercept_ = np.array([0.0])
-            if len(np.unique(self.y_train)) >= 2:
-                 self.model.partial_fit(self.X_train[:1], self.y_train[:1], classes=np.array([0, 1]))
-            elif len(self.y_train) > 0 : 
-                 self.model.partial_fit(self.X_train[:1], self.y_train[:1], classes=np.unique(self.y_train))
+            self.model.coef_ = np.zeros((self.param_classes, num_features))
+            self.model.intercept_ = np.zeros(self.param_classes)
+            self.model.partial_fit(self.X_train[:1], self.y_train[:1], classes=self.classes)
         self.dss = DifferentialStateSynchronizer() 
         self.zkip = ZeroKnowledgeIntegrityProofs() 
         self.ebcd = EntropyBasedCorruptionDetection() 
@@ -43,14 +45,16 @@ class FLClient:
         current_params = {}
         if global_params and 'coef_' in global_params and 'intercept_' in global_params:
             current_params = {
-                'coef_': np.copy(global_params['coef_']).reshape(1, self.num_features),
+                'coef_': np.copy(global_params['coef_']).reshape(self.param_classes, self.num_features),
                 'intercept_': np.copy(global_params['intercept_'])
             }
         else:
             current_params = {
-                'coef_': np.zeros((1, self.num_features)),
-                'intercept_': np.array([0.0])
+                'coef_': np.zeros((self.param_classes, self.num_features)),
+                'intercept_': np.zeros(self.param_classes)
             }
+        current_params['coef_'] = np.copy(current_params['coef_']).reshape(self.param_classes, self.num_features)
+        current_params['intercept_'] = np.copy(current_params['intercept_']).reshape(self.param_classes)
         self.model.coef_ = current_params['coef_']
         self.model.intercept_ = current_params['intercept_']
         self.dss.set_base_model_parameters(current_params)
@@ -81,12 +85,10 @@ class FLClient:
         else:
             self.last_val_acc_before = 0.0
             self.last_val_loss_before = 0.0
-        if self.is_faulty or self.X_train.shape[0] == 0 or len(np.unique(self.y_train)) < 2:
+        if self.is_faulty or self.X_train.shape[0] == 0:
             return None, None 
-        if not hasattr(self.model, 'classes_') and len(np.unique(self.y_train)) >= 2:
-            self.model.partial_fit(self.X_train[:1], self.y_train[:1], classes=np.array([0,1]))
-        elif not hasattr(self.model, 'classes_') and len(self.y_train) > 0:
-            self.model.partial_fit(self.X_train[:1], self.y_train[:1], classes=np.unique(self.y_train))
+        if not hasattr(self.model, 'classes_') and len(self.y_train) > 0:
+            self.model.partial_fit(self.X_train[:1], self.y_train[:1], classes=self.classes)
         earlystop = EarlyStopping(mode='min', patience=self.earlystop_patience)
         for epoch in range(epochs):
             self.model.partial_fit(self.X_train, self.y_train)
@@ -138,10 +140,8 @@ class FLClient:
             acc = accuracy_score(self.y_val, predictions)
             # 计算 binary cross-entropy loss
             if hasattr(self.model, "predict_proba"):
-                probas = self.model.predict_proba(self.X_val)[:, 1]  # 假设正类是 1
-                # 避免 log(0)
-                probas = np.clip(probas, 1e-15, 1 - 1e-15)
-                loss = -np.mean(self.y_val * np.log(probas) + (1 - self.y_val) * np.log(1 - probas))
+                probas = np.clip(self.model.predict_proba(self.X_val), 1e-15, 1 - 1e-15)
+                loss = log_loss(self.y_val, probas, labels=self.classes)
             else:
                 loss = 0.0  # 无法计算 loss 时用 0 占位
             return acc, loss

@@ -1,8 +1,9 @@
+import argparse
 import time
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import kurtosis, skew, entropy
-from data_utils import load_and_preprocess_data, split_data_for_clients
+from data_utils import FEDGREEN_DATA_ROOT, load_and_preprocess_data, split_data_for_clients
 from fl_client import FLClient
 from fl_server import FLServer
 import charting as charts
@@ -22,6 +23,29 @@ DP_EPSILON = 1.0 # 默认值，会被动态分配覆盖
 DP_DELTA = 1e-5
 DP_L2_NORM_CLIP = 1.0
 EARLYSTOP_PATIENCE = 3
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="APDP-RTFL federated learning experiment")
+    parser.add_argument("--dataset", default="digits",
+                        choices=["credit_card", "digits", "breast_cancer", "wine", "mnist", "fashion_mnist", "emnist", "cifar10"],
+                        help="实验数据集。默认 digits 可离线运行；EMNIST/CIFAR10 可复用 FedGreen 数据根目录。")
+    parser.add_argument("--data-root", default=FEDGREEN_DATA_ROOT,
+                        help="FedGreen 风格数据根目录，默认指向 C:\\Users\\Hao\\Desktop\\FedGreen工程\\1.测试\\data")
+    parser.add_argument("--download", action="store_true",
+                        help="允许 torchvision 下载缺失数据。默认不下载，只读取本地数据。")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="对图像数据集抽样，便于快速调试；正式实验可不设置。")
+    parser.add_argument("--num-clients", type=int, default=NUM_CLIENTS)
+    parser.add_argument("--num-rounds", type=int, default=NUM_ROUNDS)
+    parser.add_argument("--client-epochs", type=int, default=CLIENT_EPOCHS)
+    parser.add_argument("--partition", default="dirichlet",
+                        choices=["iid", "quantity_skew", "dirichlet", "label_skew", "non_iid"],
+                        help="客户端数据划分方式。dirichlet/label_skew 用于模拟 non-IID。")
+    parser.add_argument("--dirichlet-alpha", type=float, default=0.5,
+                        help="Dirichlet non-IID 强度；越小标签偏斜越强。")
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
 
 # 隐私预算分配器
 class PrivacyBudgetAllocator:
@@ -211,29 +235,41 @@ class HeterogeneousComputeAdapter:
         return min(MAX_EPSILON, max(MIN_EPSILON, new_eps))
 
 def main():
+    args = parse_args()
+    np.random.seed(args.seed)
     print("Starting RTFL Simulation with Differential Privacy...")
+    print(f"Dataset: {args.dataset}")
+    print(f"Data root: {args.data_root}")
     print(f"Total Privacy Budget: {TOTAL_PRIVACY_BUDGET}")
     print(f"Allocation Strategy: {PRIVACY_ALLOCATION_STRATEGY}")
     print(f"DP Parameters: Epsilon={DP_EPSILON}, Delta={DP_DELTA}, L2_Norm_Clip={DP_L2_NORM_CLIP}")
     # 初始化隐私预算分配器
     privacy_allocator = PrivacyBudgetAllocator(TOTAL_PRIVACY_BUDGET, PRIVACY_ALLOCATION_STRATEGY)
 
-    X_train_full, y_train_full, X_test, y_test, feature_names = load_and_preprocess_data()
+    X_train_full, y_train_full, X_test, y_test, feature_names, classes = load_and_preprocess_data(
+        dataset_name=args.dataset,
+        data_root=args.data_root,
+        random_state=args.seed,
+        download=args.download,
+        max_samples=args.max_samples,
+    )
     if X_train_full is None:
         print("Failed to load data. Exiting.")
         return
     num_features = X_train_full.shape[1]
-    print(f"Data loaded: {X_train_full.shape[0]} train samples, {X_test.shape[0]} test samples. Num features: {num_features}")
+    print(f"Data loaded: {X_train_full.shape[0]} train samples, {X_test.shape[0]} test samples. Num features: {num_features}, Classes: {classes}")
     client_datasets = split_data_for_clients(X_train_full,
         y_train_full,
-        NUM_CLIENTS,
-        size_ratios=[0.35, 0.25, 0.18, 0.12, 0.10],
-        stratified=True)
+        args.num_clients,
+        size_ratios=None,
+        partition=args.partition,
+        dirichlet_alpha=args.dirichlet_alpha,
+        random_state=args.seed)
     clients = []
-    client_ids = [f"client_{i}" for i in range(NUM_CLIENTS)]
+    client_ids = [f"client_{i}" for i in range(args.num_clients)]
     # 显示客户端数据分布信息
     print("\nClient Data Distribution:")
-    for i in range(NUM_CLIENTS):
+    for i in range(args.num_clients):
         X_c, y_c = client_datasets[i]
         unique, counts = np.unique(y_c, return_counts=True) if len(y_c) > 0 else ([], [])
         distribution = dict(zip(unique, counts)) if len(unique) > 0 else {}
@@ -242,10 +278,13 @@ def main():
 
     # Split each client's data into train/val
     client_val_sets = []
-    for i in range(NUM_CLIENTS):
+    for i in range(args.num_clients):
         X_c, y_c = client_datasets[i]
-        if X_c.shape[0] > 5:
-            X_c_train, X_c_val, y_c_train, y_c_val = train_test_split(X_c, y_c, test_size=0.2, random_state=i)
+        if X_c.shape[0] > 5 and len(np.unique(y_c)) >= 2:
+            stratify = y_c if min(np.bincount(y_c, minlength=len(classes))) >= 2 else None
+            X_c_train, X_c_val, y_c_train, y_c_val = train_test_split(
+                X_c, y_c, test_size=0.2, random_state=args.seed + i, stratify=stratify
+            )
         else:
             X_c_train, y_c_train = X_c, y_c
             X_c_val, y_c_val = None, None
@@ -256,12 +295,13 @@ def main():
                                 dp_delta=DP_DELTA, 
                                 dp_l2_norm_clip=DP_L2_NORM_CLIP,
                                 random_state=i,
-                                X_val=X_c_val, y_val=y_c_val, earlystop_patience=EARLYSTOP_PATIENCE))
+                                X_val=X_c_val, y_val=y_c_val, earlystop_patience=EARLYSTOP_PATIENCE,
+                                classes=classes))
         client_val_sets.append((X_c_val, y_c_val))
     # 新增：异构算力适配器
     compute_adapter = HeterogeneousComputeAdapter()
     # 为所有客户端分配计算能力（可以自定义，也可以随机模拟）
-    capabilities = compute_adapter.assign_capabilities(NUM_CLIENTS)
+    capabilities = compute_adapter.assign_capabilities(args.num_clients)
     # 将计算能力绑定到每个客户端对象上
     print("\n=== Client Compute Capabilities ===")
     for i, client in enumerate(clients):
@@ -278,7 +318,8 @@ def main():
     X_val_server = np.concatenate([v[0] for v in client_val_sets if v[0] is not None]) if any(v[0] is not None for v in client_val_sets) else None
     y_val_server = np.concatenate([v[1] for v in client_val_sets if v[1] is not None]) if any(v[1] is not None for v in client_val_sets) else None
     server_id = "main_server"
-    server = FLServer(server_id, client_ids, num_features, X_val=X_val_server, y_val=y_val_server, earlystop_patience=EARLYSTOP_PATIENCE)
+    server = FLServer(server_id, client_ids, num_features, X_val=X_val_server, y_val=y_val_server,
+                      earlystop_patience=EARLYSTOP_PATIENCE, classes=classes)
     initial_params_for_ebcd = [client.model_parameters() for client in clients if client.X_train.shape[0] > 0]
     if initial_params_for_ebcd:
         server.ebcd.establish_baseline(initial_params_for_ebcd)
@@ -316,8 +357,8 @@ def main():
     initial_epsilon_allocations = privacy_allocator.allocate_budget(clients, active_client_indices)
     current_epsilon_allocations = initial_epsilon_allocations.copy()
 
-    for round_num in range(1, NUM_ROUNDS + 1):
-        print(f"\n--- Round {round_num}/{NUM_ROUNDS} ---")
+    for round_num in range(1, args.num_rounds + 1):
+        print(f"\n--- Round {round_num}/{args.num_rounds} ---")
         start_time = time.time()
         # 动态调整隐私预算（从第二轮开始）
         if round_num > 1:
@@ -365,7 +406,7 @@ def main():
             client_epsilon  = current_epsilon_allocations.get(idx, DP_EPSILON)
             # 新增：根据算力进一步调整epsilon和epochs
             adjusted_epsilon = compute_adapter.adjust_epsilon_for_compute(client_epsilon, idx)
-            effective_epochs = compute_adapter.get_effective_epochs(idx, CLIENT_EPOCHS)
+            effective_epochs = compute_adapter.get_effective_epochs(idx, args.client_epochs)
 
             client.dp_epsilon = max(MIN_EPSILON, min(MAX_EPSILON, adjusted_epsilon))
             round_client_epsilon_list.append(client.dp_epsilon)
@@ -373,7 +414,7 @@ def main():
             # 打印观察效果
             print(f"Client {idx} ({client.client_id}):"
                   f"cap={getattr(client, 'compute_capability', 1.0):.2f},"
-                  f"effective_epochs={effective_epochs}, ε={client.dp_epsilon:.3f}")
+                  f"effective_epochs={effective_epochs}, epsilon={client.dp_epsilon:.3f}")
 
             client.set_global_model_parameters(global_params_for_round)
             # 使用动态的本地训练轮次
@@ -489,8 +530,8 @@ def main():
     print(f"Pravacy allocation strategy: {PRIVACY_ALLOCATION_STRATEGY}")
     print(f"Fianl privacy budget allocations: {current_epsilon_allocations}")
 
-    if NUM_ROUNDS >= 3:
-        target_recovery_round = NUM_ROUNDS // 2
+    if args.num_rounds >= 3:
+        target_recovery_round = args.num_rounds // 2
         print(f"\nAttempting to recover model state from TCM for round {target_recovery_round}...")
         recovered_model_params, rec_info = server.tcm.recover_state_by_round(target_recovery_round)
         if recovered_model_params:
