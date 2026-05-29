@@ -1,25 +1,26 @@
 import os
+import pickle
 import struct
 from collections import Counter
 
 import numpy as np
-import pandas as pd
-from sklearn.datasets import load_breast_cancer, load_digits, load_wine
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
 
 
-DATA_FILE_APPLICATION = "application_record.csv"
-DATA_FILE_CREDIT = "credit_record.csv"
-FEDGREEN_DATA_ROOT = r"C:\Users\Hao\Desktop\FedGreen工程\1.测试\data"
-
-
-def _make_one_hot_encoder():
-    try:
-        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+PROJECT_DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+SUPPORTED_DATASETS = (
+    "emnist",
+    "synthetic",
+    "cifar10",
+    "cifar100",
+    "medmnist",
+    "femnist",
+    "chestxray",
+    "nih_xray",
+    "shakespeare",
+)
+EMNIST_SPLITS = ("byclass", "balanced", "bymerge", "digits", "letters", "mnist")
+PRESPLIT_DATASETS = ("synthetic", "cifar10", "cifar100", "medmnist", "femnist", "chestxray", "nih_xray")
 
 
 def _to_numpy_features(data):
@@ -33,152 +34,20 @@ def _to_numpy_features(data):
 
 def _standardize_train_test(X_train, X_test):
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
-    return X_train.astype(float), X_test.astype(float)
+    X_train = scaler.fit_transform(np.asarray(X_train, dtype=float))
+    X_test = scaler.transform(np.asarray(X_test, dtype=float))
+    return X_train.astype(float), X_test.astype(float), scaler
 
 
-def _print_dataset_summary(name, y_train, y_test, num_features):
+def _print_dataset_summary(name, y_train, y_test, num_features, pre_split_clients=None):
     y_all = np.concatenate([np.asarray(y_train), np.asarray(y_test)])
-    class_counts = Counter(y_all.tolist())
+    class_counts = Counter(y_all.astype(int).tolist())
     print(f"\n=== Dataset Summary: {name} ===")
     print(f"Train samples: {len(y_train)}, Test samples: {len(y_test)}")
     print(f"Features: {num_features}, Classes: {len(class_counts)}")
+    if pre_split_clients is not None:
+        print(f"Pre-split federated clients: {len(pre_split_clients)}")
     print(f"Class distribution: {dict(sorted(class_counts.items()))}")
-
-
-def load_credit_card_data(random_state=42):
-    try:
-        app_df = pd.read_csv(DATA_FILE_APPLICATION)
-        cred_df = pd.read_csv(DATA_FILE_CREDIT)
-    except FileNotFoundError:
-        print(f"Error: Ensure '{DATA_FILE_APPLICATION}' and '{DATA_FILE_CREDIT}' are in the current directory.")
-        print("Download from: https://www.kaggle.com/datasets/rikdifos/credit-card-approval-prediction")
-        return None, None, None, None, None, None
-
-    df = pd.merge(app_df, cred_df, on="ID", how="inner")
-
-    def determine_credit_risk(group):
-        if any(s in ["2", "3", "4", "5"] for s in group["STATUS"].astype(str)):
-            return 1
-        return 0
-
-    target_df = df.groupby("ID").apply(determine_credit_risk).reset_index(name="TARGET")
-    unique_app_df = df.drop_duplicates(subset=["ID"], keep="first")
-    df = pd.merge(unique_app_df, target_df, on="ID", how="left")
-
-    df = df.drop(["ID", "MONTHS_BALANCE", "STATUS", "FLAG_MOBIL"], axis=1)
-    df = df.dropna(subset=["TARGET"])
-
-    for col in df.select_dtypes(include="object").columns:
-        mode = df[col].mode()
-        df[col] = df[col].fillna(mode[0] if not mode.empty else "Unknown")
-    for col in df.select_dtypes(include=np.number).columns:
-        df[col] = df[col].fillna(df[col].median())
-
-    df["DAYS_BIRTH"] = np.abs(df["DAYS_BIRTH"]) / 365
-    df["DAYS_EMPLOYED"] = df["DAYS_EMPLOYED"].apply(lambda x: 0 if x > 0 else np.abs(x) / 365)
-
-    X = df.drop("TARGET", axis=1)
-    y = df["TARGET"].astype(int).to_numpy()
-
-    categorical_features = X.select_dtypes(include="object").columns
-    numerical_features = X.select_dtypes(include=np.number).columns
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", StandardScaler(), numerical_features),
-            ("cat", _make_one_hot_encoder(), categorical_features),
-        ],
-        remainder="passthrough",
-    )
-
-    X_processed = preprocessor.fit_transform(X).astype(float)
-    try:
-        feature_names_cat = preprocessor.named_transformers_["cat"].get_feature_names_out(categorical_features)
-    except AttributeError:
-        feature_names_cat = []
-    feature_names = numerical_features.tolist() + list(feature_names_cat)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_processed, y, test_size=0.2, random_state=random_state, stratify=y
-    )
-    return X_train, y_train, X_test, y_test, feature_names, np.array([0, 1])
-
-
-def load_sklearn_dataset(dataset_name, test_size=0.2, random_state=42):
-    if dataset_name == "digits":
-        bundle = load_digits()
-    elif dataset_name == "breast_cancer":
-        bundle = load_breast_cancer()
-    elif dataset_name == "wine":
-        bundle = load_wine()
-    else:
-        raise ValueError(f"Unsupported sklearn dataset: {dataset_name}")
-
-    X = bundle.data.astype(float)
-    y = bundle.target.astype(int)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=random_state, stratify=y
-    )
-    X_train, X_test = _standardize_train_test(X_train, X_test)
-    feature_names = [str(name) for name in getattr(bundle, "feature_names", [f"feature_{i}" for i in range(X.shape[1])])]
-    classes = np.unique(y)
-    return X_train, y_train, X_test, y_test, feature_names, classes
-
-
-def load_torchvision_dataset(dataset_name, data_root=None, test_size=0.2, random_state=42, download=False, max_samples=None):
-    try:
-        from torchvision.datasets import CIFAR10, EMNIST, FashionMNIST, MNIST
-    except ImportError as exc:
-        if dataset_name == "emnist":
-            return load_emnist_idx_from_fedgreen(data_root, random_state=random_state, max_samples=max_samples)
-        raise ImportError("torchvision is required for MNIST/Fashion-MNIST/EMNIST/CIFAR-10 experiments.") from exc
-
-    data_root = data_root or FEDGREEN_DATA_ROOT
-    dataset_roots = {
-        "mnist": os.path.join(data_root, "mnist", "raw_data"),
-        "fashion_mnist": os.path.join(data_root, "fashion_mnist", "raw_data"),
-        "emnist": os.path.join(data_root, "emnist", "raw_data"),
-        "cifar10": os.path.join(data_root, "cifar10", "raw_data"),
-    }
-    root = dataset_roots[dataset_name]
-
-    if dataset_name == "mnist":
-        train_ds = MNIST(root=root, train=True, download=download)
-        test_ds = MNIST(root=root, train=False, download=download)
-        X = np.concatenate([_to_numpy_features(train_ds.data), _to_numpy_features(test_ds.data)])
-        y = np.concatenate([np.asarray(train_ds.targets), np.asarray(test_ds.targets)])
-    elif dataset_name == "fashion_mnist":
-        train_ds = FashionMNIST(root=root, train=True, download=download)
-        test_ds = FashionMNIST(root=root, train=False, download=download)
-        X = np.concatenate([_to_numpy_features(train_ds.data), _to_numpy_features(test_ds.data)])
-        y = np.concatenate([np.asarray(train_ds.targets), np.asarray(test_ds.targets)])
-    elif dataset_name == "emnist":
-        train_ds = EMNIST(root=root, split="byclass", train=True, download=download)
-        test_ds = EMNIST(root=root, split="byclass", train=False, download=download)
-        X = np.concatenate([_to_numpy_features(train_ds.data), _to_numpy_features(test_ds.data)])
-        y = np.concatenate([np.asarray(train_ds.targets), np.asarray(test_ds.targets)])
-    elif dataset_name == "cifar10":
-        train_ds = CIFAR10(root=root, train=True, download=download)
-        test_ds = CIFAR10(root=root, train=False, download=download)
-        X = np.concatenate([_to_numpy_features(train_ds.data), _to_numpy_features(test_ds.data)])
-        y = np.concatenate([np.asarray(train_ds.targets), np.asarray(test_ds.targets)])
-    else:
-        raise ValueError(f"Unsupported torchvision dataset: {dataset_name}")
-
-    if max_samples is not None and max_samples > 0 and len(y) > max_samples:
-        rng = np.random.default_rng(random_state)
-        idx = rng.choice(len(y), size=max_samples, replace=False)
-        X, y = X[idx], y[idx]
-
-    X = X / 255.0 if np.nanmax(X) > 1.0 else X
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y.astype(int), test_size=test_size, random_state=random_state, stratify=y
-    )
-    X_train, X_test = _standardize_train_test(X_train, X_test)
-    feature_names = [f"pixel_{i}" for i in range(X_train.shape[1])]
-    classes = np.unique(y)
-    return X_train, y_train, X_test, y_test, feature_names, classes
 
 
 def _read_idx_images(path):
@@ -201,8 +70,23 @@ def _read_idx_labels(path):
     return labels.astype(int)
 
 
-def load_emnist_idx_from_fedgreen(data_root=None, random_state=42, max_samples=None, split="byclass"):
-    data_root = data_root or FEDGREEN_DATA_ROOT
+def _sample_train_test(X_train, y_train, X_test, y_test, max_samples, random_state):
+    if max_samples is None or max_samples <= 0:
+        return X_train, y_train, X_test, y_test
+
+    rng = np.random.default_rng(random_state)
+    n_train = max(1, int(max_samples * 0.8))
+    n_test = max(1, max_samples - n_train)
+    train_idx = rng.choice(len(y_train), size=min(n_train, len(y_train)), replace=False)
+    test_idx = rng.choice(len(y_test), size=min(n_test, len(y_test)), replace=False)
+    return X_train[train_idx], y_train[train_idx], X_test[test_idx], y_test[test_idx]
+
+
+def load_emnist_idx(data_root=None, random_state=42, max_samples=None, split="byclass"):
+    if split not in EMNIST_SPLITS:
+        raise ValueError(f"Unsupported EMNIST split '{split}'. Use one of: {', '.join(EMNIST_SPLITS)}.")
+
+    data_root = data_root or PROJECT_DATA_ROOT
     raw_dir = os.path.join(data_root, "emnist", "raw_data", "EMNIST", "raw")
     train_images = os.path.join(raw_dir, f"emnist-{split}-train-images-idx3-ubyte")
     train_labels = os.path.join(raw_dir, f"emnist-{split}-train-labels-idx1-ubyte")
@@ -213,7 +97,7 @@ def load_emnist_idx_from_fedgreen(data_root=None, random_state=42, max_samples=N
     missing = [path for path in required if not os.path.exists(path)]
     if missing:
         raise FileNotFoundError(
-            "EMNIST IDX files were not found under the FedGreen data root. Missing: "
+            "EMNIST IDX files were not found in the project data directory. Missing: "
             + ", ".join(missing)
         )
 
@@ -221,53 +105,154 @@ def load_emnist_idx_from_fedgreen(data_root=None, random_state=42, max_samples=N
     y_train = _read_idx_labels(train_labels)
     X_test = _read_idx_images(test_images)
     y_test = _read_idx_labels(test_labels)
-
-    if max_samples is not None and max_samples > 0:
-        rng = np.random.default_rng(random_state)
-        n_train = max(1, int(max_samples * 0.8))
-        n_test = max(1, max_samples - n_train)
-        train_idx = rng.choice(len(y_train), size=min(n_train, len(y_train)), replace=False)
-        test_idx = rng.choice(len(y_test), size=min(n_test, len(y_test)), replace=False)
-        X_train, y_train = X_train[train_idx], y_train[train_idx]
-        X_test, y_test = X_test[test_idx], y_test[test_idx]
-
-    X_train, X_test = _standardize_train_test(X_train, X_test)
+    X_train, y_train, X_test, y_test = _sample_train_test(
+        X_train, y_train, X_test, y_test, max_samples, random_state
+    )
+    X_train, X_test, _ = _standardize_train_test(X_train, X_test)
     feature_names = [f"pixel_{i}" for i in range(X_train.shape[1])]
     classes = np.unique(np.concatenate([y_train, y_test]))
-    return X_train, y_train, X_test, y_test, feature_names, classes
+    return X_train, y_train, X_test, y_test, feature_names, classes, None
 
 
-def load_and_preprocess_data(
-    dataset_name="credit_card",
+def _read_pickle(path):
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def _read_task_file(path):
+    if path.endswith(".pkl"):
+        data = _read_pickle(path)
+    elif path.endswith(".pt"):
+        try:
+            import torch
+        except ImportError as exc:
+            raise ImportError("Reading FEMNIST .pt files requires torch to be installed.") from exc
+        data = torch.load(path, map_location="cpu")
+    else:
+        raise ValueError(f"Unsupported FedGreen task file: {path}")
+
+    if isinstance(data, tuple) and len(data) == 2:
+        X, y = data
+        return _to_numpy_features(X), np.asarray(y).astype(int)
+
+    if isinstance(data, list) and data and isinstance(data[0], tuple) and len(data[0]) == 2:
+        X, y = zip(*data)
+        return _to_numpy_features(np.asarray(X)), np.asarray(y).astype(int)
+
+    if isinstance(data, (list, np.ndarray)) and len(data) > 0 and np.issubdtype(np.asarray(data).dtype, np.integer):
+        raise ValueError(
+            f"{path} contains dataset indices, not feature-label pairs. "
+            "Run the dataset-specific raw loader or regenerate all_data as materialized samples."
+        )
+
+    raise ValueError(f"Could not interpret FedGreen task file: {path}")
+
+
+def _find_task_file(task_dir, split_name):
+    candidates = [
+        os.path.join(task_dir, f"{split_name}.pkl"),
+        os.path.join(task_dir, f"{split_name}.pt"),
+        os.path.join(task_dir, f"{split_name}.txt"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _load_task_split(tasks_root, split_name):
+    if not os.path.isdir(tasks_root):
+        return [], [], []
+
+    client_data = []
+    X_parts = []
+    y_parts = []
+    task_dirs = [
+        os.path.join(tasks_root, name)
+        for name in sorted(os.listdir(tasks_root))
+        if os.path.isdir(os.path.join(tasks_root, name))
+    ]
+    for task_dir in task_dirs:
+        path = _find_task_file(task_dir, split_name)
+        if path is None:
+            continue
+        X_task, y_task = _read_task_file(path)
+        if split_name == "train":
+            client_data.append((X_task, y_task))
+        X_parts.append(X_task)
+        y_parts.append(y_task)
+    return client_data, X_parts, y_parts
+
+
+def load_presplit_all_data(dataset_name, data_root=None):
+    if dataset_name == "shakespeare":
+        raise NotImplementedError(
+            "The current APDP-RTFL classifier uses SGDClassifier and does not support Shakespeare sequence modeling."
+        )
+
+    data_root = data_root or PROJECT_DATA_ROOT
+    all_data_dir = os.path.join(data_root, dataset_name, "all_data")
+    if not os.path.isdir(all_data_dir):
+        raise FileNotFoundError(
+            f"{all_data_dir} does not exist. Generate FedGreen-style client data first, for example by running "
+            f"data/{dataset_name}/generate_data.py with the required arguments."
+        )
+
+    train_root = os.path.join(all_data_dir, "train")
+    test_root = os.path.join(all_data_dir, "test")
+    client_data, X_train_parts, y_train_parts = _load_task_split(train_root, "train")
+    _, X_test_parts, y_test_parts = _load_task_split(train_root, "test")
+    _, X_external_test_parts, y_external_test_parts = _load_task_split(test_root, "test")
+    X_test_parts.extend(X_external_test_parts)
+    y_test_parts.extend(y_external_test_parts)
+
+    if not X_train_parts:
+        raise FileNotFoundError(f"No train task files were found under {train_root}.")
+    if not X_test_parts:
+        raise FileNotFoundError(f"No test task files were found under {all_data_dir}.")
+
+    X_train = np.concatenate(X_train_parts)
+    y_train = np.concatenate(y_train_parts).astype(int)
+    X_test = np.concatenate(X_test_parts)
+    y_test = np.concatenate(y_test_parts).astype(int)
+    X_train, X_test, scaler = _standardize_train_test(X_train, X_test)
+    standardized_clients = [
+        (scaler.transform(np.asarray(X_client, dtype=float)), y_client.astype(int))
+        for X_client, y_client in client_data
+    ]
+    feature_names = [f"feature_{i}" for i in range(X_train.shape[1])]
+    classes = np.unique(np.concatenate([y_train, y_test]))
+    return X_train, y_train, X_test, y_test, feature_names, classes, standardized_clients
+
+
+def load_experiment_data(
+    dataset_name="emnist",
     data_root=None,
-    test_size=0.2,
     random_state=42,
-    download=False,
     max_samples=None,
+    emnist_split="byclass",
 ):
     dataset_name = dataset_name.lower()
-    if dataset_name in {"credit", "credit_card", "credit_card_approval"}:
-        result = load_credit_card_data(random_state=random_state)
-    elif dataset_name in {"digits", "breast_cancer", "wine"}:
-        result = load_sklearn_dataset(dataset_name, test_size=test_size, random_state=random_state)
-    elif dataset_name in {"mnist", "fashion_mnist", "emnist", "cifar10"}:
-        result = load_torchvision_dataset(
-            dataset_name,
+    if dataset_name == "nih_xray":
+        dataset_name = "NIH_Xray"
+    elif dataset_name == "chestxray":
+        dataset_name = "Chestxray"
+
+    if dataset_name.lower() not in SUPPORTED_DATASETS:
+        raise ValueError(f"Unsupported dataset '{dataset_name}'. Use one of: {', '.join(SUPPORTED_DATASETS)}.")
+
+    if dataset_name.lower() == "emnist":
+        result = load_emnist_idx(
             data_root=data_root,
-            test_size=test_size,
             random_state=random_state,
-            download=download,
             max_samples=max_samples,
+            split=emnist_split,
         )
     else:
-        raise ValueError(
-            f"Unsupported dataset '{dataset_name}'. "
-            "Use credit_card, digits, breast_cancer, wine, mnist, fashion_mnist, emnist, or cifar10."
-        )
+        result = load_presplit_all_data(dataset_name, data_root=data_root)
 
-    X_train, y_train, X_test, y_test, feature_names, classes = result
-    if X_train is not None:
-        _print_dataset_summary(dataset_name, y_train, y_test, X_train.shape[1])
+    X_train, y_train, X_test, y_test, feature_names, classes, client_data = result
+    _print_dataset_summary(dataset_name, y_train, y_test, X_train.shape[1], pre_split_clients=client_data)
     return result
 
 
@@ -313,13 +298,7 @@ def split_data_for_clients(
     split_sizes = _client_split_sizes(n_total, num_clients, size_ratios, min_samples)
     client_indices = [[] for _ in range(num_clients)]
 
-    if partition == "iid":
-        shuffled = rng.permutation(n_total)
-        start = 0
-        for client_id, size in enumerate(split_sizes):
-            client_indices[client_id] = shuffled[start:start + size].tolist()
-            start += size
-    elif partition in {"quantity_skew", "quantity"}:
+    if partition in {"iid", "quantity_skew", "quantity"}:
         shuffled = rng.permutation(n_total)
         start = 0
         for client_id, size in enumerate(split_sizes):

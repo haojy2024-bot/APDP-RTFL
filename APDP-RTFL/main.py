@@ -1,9 +1,11 @@
 import argparse
+import os
 import time
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import kurtosis, skew, entropy
-from data_utils import FEDGREEN_DATA_ROOT, load_and_preprocess_data, split_data_for_clients
+from data_utils import EMNIST_SPLITS, PROJECT_DATA_ROOT, SUPPORTED_DATASETS, load_experiment_data, split_data_for_clients
 from fl_client import FLClient
 from fl_server import FLServer
 import charting as charts
@@ -27,15 +29,16 @@ EARLYSTOP_PATIENCE = 3
 
 def parse_args():
     parser = argparse.ArgumentParser(description="APDP-RTFL federated learning experiment")
-    parser.add_argument("--dataset", default="digits",
-                        choices=["credit_card", "digits", "breast_cancer", "wine", "mnist", "fashion_mnist", "emnist", "cifar10"],
-                        help="实验数据集。默认 digits 可离线运行；EMNIST/CIFAR10 可复用 FedGreen 数据根目录。")
-    parser.add_argument("--data-root", default=FEDGREEN_DATA_ROOT,
-                        help="FedGreen 风格数据根目录，默认指向 C:\\Users\\Hao\\Desktop\\FedGreen工程\\1.测试\\data")
-    parser.add_argument("--download", action="store_true",
-                        help="允许 torchvision 下载缺失数据。默认不下载，只读取本地数据。")
+    parser.add_argument("--dataset", default="emnist",
+                        choices=list(SUPPORTED_DATASETS),
+                        help="实验数据集。默认 emnist，仅从项目 data/ 目录读取。")
+    parser.add_argument("--data-root", default=PROJECT_DATA_ROOT,
+                        help="项目本地数据根目录，默认指向 APDP-RTFL/data。")
+    parser.add_argument("--emnist-split", default="byclass",
+                        choices=list(EMNIST_SPLITS),
+                        help="EMNIST 子集。默认 byclass，可选 digits/balanced/bymerge/letters/mnist。")
     parser.add_argument("--max-samples", type=int, default=None,
-                        help="对图像数据集抽样，便于快速调试；正式实验可不设置。")
+                        help="对 EMNIST 抽样，便于快速调试；正式实验可不设置。")
     parser.add_argument("--num-clients", type=int, default=NUM_CLIENTS)
     parser.add_argument("--num-rounds", type=int, default=NUM_ROUNDS)
     parser.add_argument("--client-epochs", type=int, default=CLIENT_EPOCHS)
@@ -44,8 +47,21 @@ def parse_args():
                         help="客户端数据划分方式。dirichlet/label_skew 用于模拟 non-IID。")
     parser.add_argument("--dirichlet-alpha", type=float, default=0.5,
                         help="Dirichlet non-IID 强度；越小标签偏斜越强。")
+    parser.add_argument("--output-root", default="results",
+                        help="实验结果根目录。默认保存到 results。")
+    parser.add_argument("--run-name", default=None,
+                        help="本次实验目录名。默认自动使用 数据集_YYYYmmdd_HHMMSS。")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def create_output_dir(args):
+    run_name = args.run_name or f"{args.dataset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    output_root = args.output_root if os.path.isabs(args.output_root) else os.path.join(repo_root, args.output_root)
+    output_dir = os.path.join(output_root, run_name)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
 
 # 隐私预算分配器
 class PrivacyBudgetAllocator:
@@ -237,34 +253,41 @@ class HeterogeneousComputeAdapter:
 def main():
     args = parse_args()
     np.random.seed(args.seed)
+    output_dir = create_output_dir(args)
     print("Starting RTFL Simulation with Differential Privacy...")
     print(f"Dataset: {args.dataset}")
     print(f"Data root: {args.data_root}")
+    print(f"Results will be saved to: {output_dir}")
     print(f"Total Privacy Budget: {TOTAL_PRIVACY_BUDGET}")
     print(f"Allocation Strategy: {PRIVACY_ALLOCATION_STRATEGY}")
     print(f"DP Parameters: Epsilon={DP_EPSILON}, Delta={DP_DELTA}, L2_Norm_Clip={DP_L2_NORM_CLIP}")
     # 初始化隐私预算分配器
     privacy_allocator = PrivacyBudgetAllocator(TOTAL_PRIVACY_BUDGET, PRIVACY_ALLOCATION_STRATEGY)
 
-    X_train_full, y_train_full, X_test, y_test, feature_names, classes = load_and_preprocess_data(
+    X_train_full, y_train_full, X_test, y_test, feature_names, classes, presplit_client_data = load_experiment_data(
         dataset_name=args.dataset,
         data_root=args.data_root,
         random_state=args.seed,
-        download=args.download,
         max_samples=args.max_samples,
+        emnist_split=args.emnist_split,
     )
     if X_train_full is None:
         print("Failed to load data. Exiting.")
         return
     num_features = X_train_full.shape[1]
     print(f"Data loaded: {X_train_full.shape[0]} train samples, {X_test.shape[0]} test samples. Num features: {num_features}, Classes: {classes}")
-    client_datasets = split_data_for_clients(X_train_full,
-        y_train_full,
-        args.num_clients,
-        size_ratios=None,
-        partition=args.partition,
-        dirichlet_alpha=args.dirichlet_alpha,
-        random_state=args.seed)
+    if presplit_client_data is not None:
+        client_datasets = presplit_client_data
+        args.num_clients = len(client_datasets)
+        print(f"Using {args.num_clients} pre-split clients from {args.dataset}/all_data.")
+    else:
+        client_datasets = split_data_for_clients(X_train_full,
+            y_train_full,
+            args.num_clients,
+            size_ratios=None,
+            partition=args.partition,
+            dirichlet_alpha=args.dirichlet_alpha,
+            random_state=args.seed)
     clients = []
     client_ids = [f"client_{i}" for i in range(args.num_clients)]
     # 显示客户端数据分布信息
@@ -539,40 +562,40 @@ def main():
         else:
             print(f"Failed to recover model for round {target_recovery_round}.")
     # --- Save per-client metrics as .npy for research ---
-    np.save('per_client_update_norms.npy', np.array(per_client_update_norms, dtype=object))
-    np.save('per_client_ebcd_stats.npy', np.array(per_client_ebcd_stats, dtype=object))
-    np.save('per_client_zkip_status.npy', np.array(per_client_zkip_status, dtype=object))
-    np.save('per_client_epsilon.npy', np.array(per_client_epsilon, dtype=object)) # 保存隐私预算分配
+    np.save(os.path.join(output_dir, 'per_client_update_norms.npy'), np.array(per_client_update_norms, dtype=object))
+    np.save(os.path.join(output_dir, 'per_client_ebcd_stats.npy'), np.array(per_client_ebcd_stats, dtype=object))
+    np.save(os.path.join(output_dir, 'per_client_zkip_status.npy'), np.array(per_client_zkip_status, dtype=object))
+    np.save(os.path.join(output_dir, 'per_client_epsilon.npy'), np.array(per_client_epsilon, dtype=object)) # 保存隐私预算分配
     # --- Save plots for research ---
     charts.plot_global_metrics(rounds, accuracies, f1_scores, aucs)
-    plt.savefig('global_metrics.png')
+    plt.savefig(os.path.join(output_dir, 'global_metrics.png'))
     plt.close()
     charts.plot_ebcd_stats(rounds, ebcd_variances, ebcd_kurtoses, ebcd_skewnesses)
-    plt.savefig('ebcd_stats.png')
+    plt.savefig(os.path.join(output_dir, 'ebcd_stats.png'))
     plt.close()
     # For server status, encode status as int for plotting
     status_map = {s: i for i, s in enumerate(sorted(set(server_statuses)))}
     status_ints = [status_map[s] for s in server_statuses]
     charts.plot_server_status(rounds, status_ints, coordinator_ids)
-    plt.savefig('server_status.png')
+    plt.savefig(os.path.join(output_dir, 'server_status.png'))
     plt.close()
     charts.plot_dp_noise_scale(rounds, dp_noise_scales)
-    plt.savefig('dp_noise_scale.png')
+    plt.savefig(os.path.join(output_dir, 'dp_noise_scale.png'))
     plt.close()
     charts.plot_agg_client_counts(rounds, agg_client_counts)
-    plt.savefig('agg_client_counts.png')
+    plt.savefig(os.path.join(output_dir, 'agg_client_counts.png'))
     plt.close()
     charts.plot_zkip_failures(rounds, zkip_failures)
-    plt.savefig('zkip_failures.png')
+    plt.savefig(os.path.join(output_dir, 'zkip_failures.png'))
     plt.close()
     charts.plot_delta_norm(rounds, delta_norms)
-    plt.savefig('delta_norm.png')
+    plt.savefig(os.path.join(output_dir, 'delta_norm.png'))
     plt.close()
     charts.plot_ebcd_alerts(rounds, ebcd_alerts)
-    plt.savefig('ebcd_alerts.png')
+    plt.savefig(os.path.join(output_dir, 'ebcd_alerts.png'))
     plt.close()
     charts.plot_tcm_state_count(rounds, tcm_counts)
-    plt.savefig('tcm_state_count.png')
+    plt.savefig(os.path.join(output_dir, 'tcm_state_count.png'))
     plt.close()
 
     # 隐私预算分配可视化
@@ -595,7 +618,7 @@ def main():
                   f'Strategy:{PRIVACY_ALLOCATION_STRATEGY}, TOTAL_PRIVACY_BUDGET:{TOTAL_PRIVACY_BUDGET}')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        plt.savefig('privacy_budget_allocation.png')
+        plt.savefig(os.path.join(output_dir, 'privacy_budget_allocation.png'))
         plt.close()
 
     #调用隐私预算分配可视化函数
@@ -629,7 +652,7 @@ def main():
             plt.legend()
 
         plt.tight_layout()
-        plt.savefig('epsilon_vs_data_quality.png')
+        plt.savefig(os.path.join(output_dir, 'epsilon_vs_data_quality.png'))
         plt.close()
 
     plot_epsilon_vs_data_quality(clients, current_epsilon_allocations)
@@ -640,11 +663,11 @@ def main():
         for _ in rounds:
             best_accs.append(server.earlystop.best_metric if server.earlystop.best_metric != -float('inf') else np.nan)
         charts.plot_early_stopping_metric(rounds, best_accs, metric_name="Best Validation Accuracy", ylabel="Accuracy")
-        plt.savefig('earlystop_server_best_val_acc.png')
+        plt.savefig(os.path.join(output_dir, 'earlystop_server_best_val_acc.png'))
         plt.close()
     # --- Per-client plots ---
     charts.plot_per_client_update_norms(rounds, per_client_update_norms, client_ids)
-    plt.savefig('per_client_update_norms.png')
+    plt.savefig(os.path.join(output_dir, 'per_client_update_norms.png'))
     plt.close()
     # Per-client EBCD stats: variance, kurtosis, skewness
     for stat_idx, stat_name in enumerate(['Variance', 'Kurtosis', 'Skewness']):
@@ -658,10 +681,10 @@ def main():
                     val = None
                 stat_data[c][r] = val
         charts.plot_per_client_ebcd_stats(rounds, stat_data, client_ids, stat_name)
-        plt.savefig(f'per_client_ebcd_{stat_name.lower()}.png')
+        plt.savefig(os.path.join(output_dir, f'per_client_ebcd_{stat_name.lower()}.png'))
         plt.close()
     charts.plot_per_client_zkip_status(rounds, per_client_zkip_status, client_ids)
-    plt.savefig('per_client_zkip_status.png')
+    plt.savefig(os.path.join(output_dir, 'per_client_zkip_status.png'))
     plt.close()
 
     # 每轮每个客户端的隐私预算可视化
@@ -685,10 +708,11 @@ def main():
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig('per_client_epsilon_dynamic_dp.png')
+        plt.savefig(os.path.join(output_dir, 'per_client_epsilon_dynamic_dp.png'))
         plt.close()
 
     plot_per_client_epsilon(rounds, per_client_epsilon, client_ids)
+    print(f"Experiment artifacts saved to: {output_dir}")
 
 if __name__ == "__main__":
     main()

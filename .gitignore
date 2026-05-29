@@ -5,3 +5,7 @@ __pycache__/
 *.npy
 logs/
 save/
+data/
+APDP-RTFL/data/
+results/*
+!results/.gitkeep
