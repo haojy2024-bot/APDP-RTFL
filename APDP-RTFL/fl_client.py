@@ -141,6 +141,8 @@ class FLClient:
             # 计算 binary cross-entropy loss
             if hasattr(self.model, "predict_proba"):
                 probas = np.clip(self.model.predict_proba(self.X_val), 1e-15, 1 - 1e-15)
+                row_sums = probas.sum(axis=1, keepdims=True)
+                probas = probas / np.where(row_sums == 0, 1.0, row_sums)
                 loss = log_loss(self.y_val, probas, labels=self.classes)
             else:
                 loss = 0.0  # 无法计算 loss 时用 0 占位
