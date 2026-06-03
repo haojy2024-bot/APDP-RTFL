@@ -58,6 +58,12 @@ def parse_args():
                         help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,dp_rtfl,apdp_rtfl.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
                         help="FedProx proximal coefficient. Default: 0.01.")
+    parser.add_argument("--backend", default="sklearn", choices=["sklearn", "torch"],
+                        help="Training backend. Use torch with --device cuda for GPU experiments.")
+    parser.add_argument("--device", default="auto",
+                        help="Torch device for --backend torch: auto, cpu, cuda, or cuda:0.")
+    parser.add_argument("--torch-batch-size", type=int, default=256,
+                        help="Mini-batch size for the torch backend.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -262,8 +268,17 @@ def main():
     np.random.seed(args.seed)
     output_dir = create_output_dir(args)
     if args.experiment_suite == "baselines":
-        from baselines import run_baseline_suite
-        run_baseline_suite(args, output_dir)
+        if args.backend == "torch":
+            from torch_baselines import run_torch_baseline_suite
+            run_torch_baseline_suite(args, output_dir)
+        else:
+            from baselines import run_baseline_suite
+            run_baseline_suite(args, output_dir)
+        return
+    if args.backend == "torch":
+        from torch_baselines import run_torch_baseline_suite
+        args.methods = "apdp_rtfl" if args.methods == "all" else args.methods
+        run_torch_baseline_suite(args, output_dir)
         return
     print("Starting RTFL Simulation with Differential Privacy...")
     print(f"Dataset: {args.dataset}")
