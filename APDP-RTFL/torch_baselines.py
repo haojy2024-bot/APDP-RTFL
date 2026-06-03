@@ -16,12 +16,7 @@ from sklearn.metrics import (
 from baselines import (
     BASELINE_METHODS,
     BASE_LEARNING_RATE,
-    DP_DELTA,
-    DP_EPSILON,
-    DP_L2_NORM_CLIP,
-    MAX_EPSILON,
     METHOD_CONFIGS,
-    MIN_EPSILON,
     _adaptive_adjust,
     _adjust_epsilon_for_compute,
     _aggregate_deltas,
@@ -33,6 +28,7 @@ from baselines import (
     _save_method_artifacts,
     _save_suite_summary,
     _split_train_val,
+    make_privacy_config,
 )
 from data_utils import load_experiment_data, split_data_for_clients
 from fl_server import FLServer
@@ -50,6 +46,7 @@ class TorchLinearClient:
         learning_rate=BASE_LEARNING_RATE,
         batch_size=256,
         random_state=0,
+        privacy_config=None,
     ):
         self.client_id = client_id
         self.X_train = np.asarray(X_train, dtype=np.float32)
@@ -62,9 +59,9 @@ class TorchLinearClient:
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.random_state = random_state
-        self.dp_epsilon = DP_EPSILON
-        self.dp_delta = DP_DELTA
-        self.dp_l2_norm_clip = DP_L2_NORM_CLIP
+        self.dp_epsilon = privacy_config.dp_epsilon
+        self.dp_delta = privacy_config.dp_delta
+        self.dp_l2_norm_clip = privacy_config.dp_l2_norm_clip
         self.model = torch.nn.Linear(num_features, self.n_classes).to(device)
         torch.manual_seed(random_state)
         with torch.no_grad():
@@ -198,7 +195,7 @@ def _resolve_device(device_arg):
     return device
 
 
-def _init_torch_clients(train_val_data, num_features, classes, device, args):
+def _init_torch_clients(train_val_data, num_features, classes, device, args, privacy_config):
     clients = []
     for i, (X_train, y_train, _, _) in enumerate(train_val_data):
         clients.append(
@@ -212,16 +209,17 @@ def _init_torch_clients(train_val_data, num_features, classes, device, args):
                 learning_rate=BASE_LEARNING_RATE,
                 batch_size=args.torch_batch_size,
                 random_state=args.seed + i,
+                privacy_config=privacy_config,
             )
         )
     return clients
 
 
-def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, classes, failure_plan, output_dir, device):
+def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, classes, failure_plan, output_dir, device, privacy_config):
     config = METHOD_CONFIGS[method_name]
     num_features = X_test.shape[1]
     classes = np.asarray(classes, dtype=int)
-    clients = _init_torch_clients(train_val_data, num_features, classes, device, args)
+    clients = _init_torch_clients(train_val_data, num_features, classes, device, args, privacy_config)
     client_ids = [client.client_id for client in clients]
     capabilities = _assign_capabilities(len(clients))
     server = FLServer(f"{method_name}_server", client_ids, num_features, classes=classes)
@@ -230,7 +228,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
         server.ebcd.establish_baseline([client.model_parameters() for client in clients])
 
     active_indices = list(range(len(clients)))
-    current_allocations = _allocate_budget(clients, active_indices, capabilities, config["dynamic_privacy"])
+    current_allocations = _allocate_budget(clients, active_indices, capabilities, config["dynamic_privacy"], privacy_config)
     contribution_history = []
     result = {
         "method": method_name,
@@ -259,7 +257,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
         if config["dynamic_privacy"] and round_num > 1:
-            current_allocations = _adaptive_adjust(clients, current_allocations, contribution_history)
+            current_allocations = _adaptive_adjust(clients, current_allocations, contribution_history, privacy_config)
 
         global_params = {k: np.copy(v) for k, v in server.global_model_parameters.items()}
         client_updates = []
@@ -278,9 +276,11 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
                 round_epsilons.append(None)
                 continue
 
-            base_epsilon = current_allocations.get(idx, DP_EPSILON)
-            effective_epsilon = _adjust_epsilon_for_compute(base_epsilon, idx, capabilities, config["compute_adapter"])
-            client.dp_epsilon = max(MIN_EPSILON, min(MAX_EPSILON, effective_epsilon))
+            base_epsilon = current_allocations.get(idx, privacy_config.dp_epsilon)
+            effective_epsilon = _adjust_epsilon_for_compute(
+                base_epsilon, idx, capabilities, config["compute_adapter"], privacy_config
+            )
+            client.dp_epsilon = max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, effective_epsilon))
             round_epsilons.append(client.dp_epsilon)
             effective_epochs = _effective_epochs(idx, args.client_epochs, capabilities, config["compute_adapter"])
             delta, proof = client.train(
@@ -365,8 +365,17 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
 def run_torch_baseline_suite(args, output_dir):
     device = _resolve_device(args.device)
     methods = _parse_methods(args.methods)
+    privacy_config = make_privacy_config(args)
     print(f"Running torch baseline suite on device={device}: {methods}")
     print(f"Results will be saved to: {output_dir}")
+    print(
+        "Privacy config: "
+        f"total_budget={privacy_config.total_budget}, "
+        f"min_epsilon={privacy_config.min_epsilon}, "
+        f"max_epsilon={privacy_config.max_epsilon}, "
+        f"dp_l2_norm_clip={privacy_config.dp_l2_norm_clip}, "
+        f"failure_prob={privacy_config.failure_prob}"
+    )
 
     X_train_full, y_train_full, X_test, y_test, _, classes, presplit_client_data = load_experiment_data(
         dataset_name=args.dataset,
@@ -394,7 +403,7 @@ def run_torch_baseline_suite(args, output_dir):
 
     train_val_data = _split_train_val(client_datasets, classes, args.seed)
     rng = np.random.default_rng(args.seed + 2026)
-    failure_plan = rng.random((args.num_rounds, args.num_clients)) < 0.15
+    failure_plan = rng.random((args.num_rounds, args.num_clients)) < privacy_config.failure_prob
     method_results = {}
     for method_name in methods:
         method_output_dir = os.path.join(output_dir, method_name)
@@ -408,6 +417,7 @@ def run_torch_baseline_suite(args, output_dir):
             failure_plan,
             method_output_dir,
             device,
+            privacy_config,
         )
     _save_suite_summary(output_dir, method_results)
     print(f"Torch baseline suite artifacts saved to: {output_dir}")

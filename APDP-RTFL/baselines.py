@@ -25,6 +25,31 @@ EARLYSTOP_PATIENCE = 3
 BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl", "dp_rtfl", "apdp_rtfl")
 
 
+class PrivacyRuntimeConfig:
+    def __init__(self, total_budget=TOTAL_PRIVACY_BUDGET, min_epsilon=MIN_EPSILON,
+                 max_epsilon=MAX_EPSILON, dp_epsilon=DP_EPSILON, dp_delta=DP_DELTA,
+                 dp_l2_norm_clip=DP_L2_NORM_CLIP, failure_prob=0.15):
+        self.total_budget = total_budget
+        self.min_epsilon = min_epsilon
+        self.max_epsilon = max_epsilon
+        self.dp_epsilon = dp_epsilon
+        self.dp_delta = dp_delta
+        self.dp_l2_norm_clip = dp_l2_norm_clip
+        self.failure_prob = failure_prob
+
+
+def make_privacy_config(args):
+    return PrivacyRuntimeConfig(
+        total_budget=args.total_privacy_budget,
+        min_epsilon=args.min_epsilon,
+        max_epsilon=args.max_epsilon,
+        dp_epsilon=args.dp_epsilon,
+        dp_delta=args.dp_delta,
+        dp_l2_norm_clip=args.dp_l2_norm_clip,
+        failure_prob=args.failure_prob,
+    )
+
+
 METHOD_CONFIGS = {
     "fedavg": {
         "label": "FedAvg",
@@ -128,26 +153,26 @@ def _effective_epochs(client_idx, base_epochs, capabilities, enabled):
     return max(1, int(base_epochs * cap * 1.1))
 
 
-def _adjust_epsilon_for_compute(base_epsilon, client_idx, capabilities, enabled):
+def _adjust_epsilon_for_compute(base_epsilon, client_idx, capabilities, enabled, privacy_config):
     if not enabled:
         return base_epsilon
     cap = capabilities.get(client_idx, 1.0)
     if cap < 0.3:
-        return MAX_EPSILON
+        return privacy_config.max_epsilon
     adjustment = 1.0 + (1.0 - cap) * 0.8
-    return min(MAX_EPSILON, max(MIN_EPSILON, base_epsilon * adjustment))
+    return min(privacy_config.max_epsilon, max(privacy_config.min_epsilon, base_epsilon * adjustment))
 
 
-def _allocate_budget(clients, active_indices, capabilities, dynamic):
+def _allocate_budget(clients, active_indices, capabilities, dynamic, privacy_config):
     if not active_indices:
         return {}
     if not dynamic:
-        epsilon = TOTAL_PRIVACY_BUDGET / len(active_indices)
+        epsilon = privacy_config.total_budget / len(active_indices)
         return {idx: epsilon for idx in active_indices}
 
     total_data = sum(len(clients[i].y_train) for i in active_indices)
     if total_data == 0:
-        epsilon = TOTAL_PRIVACY_BUDGET / len(active_indices)
+        epsilon = privacy_config.total_budget / len(active_indices)
         return {idx: epsilon for idx in active_indices}
 
     compute_factors = {i: 1.0 / (capabilities.get(i, 1.0) + 0.01) for i in active_indices}
@@ -162,12 +187,12 @@ def _allocate_budget(clients, active_indices, capabilities, dynamic):
         weights[i] = weight
         total_weight += weight
     if total_weight == 0:
-        epsilon = TOTAL_PRIVACY_BUDGET / len(active_indices)
+        epsilon = privacy_config.total_budget / len(active_indices)
         return {idx: epsilon for idx in active_indices}
-    return {idx: (weights[idx] / total_weight) * TOTAL_PRIVACY_BUDGET for idx in active_indices}
+    return {idx: (weights[idx] / total_weight) * privacy_config.total_budget for idx in active_indices}
 
 
-def _adaptive_adjust(clients, previous_allocations, contribution_history):
+def _adaptive_adjust(clients, previous_allocations, contribution_history, privacy_config):
     if not contribution_history:
         return previous_allocations.copy()
     scores = {}
@@ -179,13 +204,16 @@ def _adaptive_adjust(clients, previous_allocations, contribution_history):
     adjusted = previous_allocations.copy()
     for i, epsilon in previous_allocations.items():
         if scores.get(i, 0.0) > global_avg * 1.05:
-            adjusted[i] = min(MAX_EPSILON, epsilon * 1.25)
+            adjusted[i] = min(privacy_config.max_epsilon, epsilon * 1.25)
         else:
-            adjusted[i] = max(MIN_EPSILON, epsilon * 0.75)
+            adjusted[i] = max(privacy_config.min_epsilon, epsilon * 0.75)
     total = sum(adjusted.values())
     if total > 0:
-        scale = TOTAL_PRIVACY_BUDGET / total
-        adjusted = {i: max(MIN_EPSILON, min(MAX_EPSILON, eps * scale)) for i, eps in adjusted.items()}
+        scale = privacy_config.total_budget / total
+        adjusted = {
+            i: max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, eps * scale))
+            for i, eps in adjusted.items()
+        }
     return adjusted
 
 
@@ -205,7 +233,7 @@ def _split_train_val(client_datasets, classes, seed):
     return train_val
 
 
-def _init_clients(train_val_data, num_features, classes, seed):
+def _init_clients(train_val_data, num_features, classes, seed, privacy_config):
     clients = []
     for i, (X_train, y_train, X_val, y_val) in enumerate(train_val_data):
         clients.append(
@@ -215,9 +243,9 @@ def _init_clients(train_val_data, num_features, classes, seed):
                 y_train,
                 num_features,
                 learning_rate=BASE_LEARNING_RATE,
-                dp_epsilon=DP_EPSILON,
-                dp_delta=DP_DELTA,
-                dp_l2_norm_clip=DP_L2_NORM_CLIP,
+                dp_epsilon=privacy_config.dp_epsilon,
+                dp_delta=privacy_config.dp_delta,
+                dp_l2_norm_clip=privacy_config.dp_l2_norm_clip,
                 random_state=seed + i,
                 X_val=X_val,
                 y_val=y_val,
@@ -325,10 +353,10 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
     plt.close()
 
 
-def _run_single_method(method_name, args, train_val_data, X_test, y_test, classes, failure_plan, output_dir):
+def _run_single_method(method_name, args, train_val_data, X_test, y_test, classes, failure_plan, output_dir, privacy_config):
     config = METHOD_CONFIGS[method_name]
     num_features = X_test.shape[1]
-    clients = _init_clients(train_val_data, num_features, classes, args.seed)
+    clients = _init_clients(train_val_data, num_features, classes, args.seed, privacy_config)
     client_ids = [client.client_id for client in clients]
     capabilities = _assign_capabilities(len(clients))
     for i, client in enumerate(clients):
@@ -341,7 +369,7 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
             server.ebcd.establish_baseline(initial_params)
 
     active_indices = list(range(len(clients)))
-    current_allocations = _allocate_budget(clients, active_indices, capabilities, config["dynamic_privacy"])
+    current_allocations = _allocate_budget(clients, active_indices, capabilities, config["dynamic_privacy"], privacy_config)
     contribution_history = []
 
     result = {
@@ -371,7 +399,7 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
         if config["dynamic_privacy"] and round_num > 1:
-            current_allocations = _adaptive_adjust(clients, current_allocations, contribution_history)
+            current_allocations = _adaptive_adjust(clients, current_allocations, contribution_history, privacy_config)
 
         global_params = {k: np.copy(v) for k, v in server.global_model_parameters.items()}
         client_updates = []
@@ -390,11 +418,11 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
                 round_epsilons.append(None)
                 continue
 
-            base_epsilon = current_allocations.get(idx, DP_EPSILON)
+            base_epsilon = current_allocations.get(idx, privacy_config.dp_epsilon)
             effective_epsilon = _adjust_epsilon_for_compute(
-                base_epsilon, idx, capabilities, config["compute_adapter"]
+                base_epsilon, idx, capabilities, config["compute_adapter"], privacy_config
             )
-            client.dp_epsilon = max(MIN_EPSILON, min(MAX_EPSILON, effective_epsilon))
+            client.dp_epsilon = max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, effective_epsilon))
             round_epsilons.append(client.dp_epsilon)
             effective_epochs = _effective_epochs(
                 idx, args.client_epochs, capabilities, config["compute_adapter"]
@@ -535,6 +563,11 @@ def _save_suite_summary(output_dir, method_results):
                     "balanced_accuracy": result["balanced_accuracies"][idx],
                     "f1_score": result["f1_scores"][idx],
                     "auc_roc": result["aucs"][idx],
+                    "dp_noise_scale": result["dp_noise_scales"][idx],
+                    "agg_client_count": result["agg_client_counts"][idx],
+                    "zkip_failures": result["zkip_failures"][idx],
+                    "ebcd_alert": result["ebcd_alerts"][idx],
+                    "tcm_state_count": result["tcm_counts"][idx],
                     "round_duration": result["round_durations"][idx],
                 }
             )
@@ -566,8 +599,17 @@ def _save_suite_summary(output_dir, method_results):
 
 def run_baseline_suite(args, output_dir):
     methods = _parse_methods(args.methods)
+    privacy_config = make_privacy_config(args)
     print(f"Running baseline suite: {methods}")
     print(f"Results will be saved to: {output_dir}")
+    print(
+        "Privacy config: "
+        f"total_budget={privacy_config.total_budget}, "
+        f"min_epsilon={privacy_config.min_epsilon}, "
+        f"max_epsilon={privacy_config.max_epsilon}, "
+        f"dp_l2_norm_clip={privacy_config.dp_l2_norm_clip}, "
+        f"failure_prob={privacy_config.failure_prob}"
+    )
 
     X_train_full, y_train_full, X_test, y_test, _, classes, presplit_client_data = load_experiment_data(
         dataset_name=args.dataset,
@@ -595,7 +637,7 @@ def run_baseline_suite(args, output_dir):
 
     train_val_data = _split_train_val(client_datasets, classes, args.seed)
     rng = np.random.default_rng(args.seed + 2026)
-    failure_plan = rng.random((args.num_rounds, args.num_clients)) < 0.15
+    failure_plan = rng.random((args.num_rounds, args.num_clients)) < privacy_config.failure_prob
 
     method_results = {}
     for method_name in methods:
@@ -609,6 +651,7 @@ def run_baseline_suite(args, output_dir):
             classes,
             failure_plan,
             method_output_dir,
+            privacy_config,
         )
     _save_suite_summary(output_dir, method_results)
     print(f"Baseline suite artifacts saved to: {output_dir}")

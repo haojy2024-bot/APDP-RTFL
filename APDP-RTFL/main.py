@@ -64,6 +64,20 @@ def parse_args():
                         help="Torch device for --backend torch: auto, cpu, cuda, or cuda:0.")
     parser.add_argument("--torch-batch-size", type=int, default=256,
                         help="Mini-batch size for the torch backend.")
+    parser.add_argument("--total-privacy-budget", type=float, default=TOTAL_PRIVACY_BUDGET,
+                        help="Total privacy budget allocated across active clients.")
+    parser.add_argument("--min-epsilon", type=float, default=MIN_EPSILON,
+                        help="Minimum per-client epsilon after adaptive adjustment.")
+    parser.add_argument("--max-epsilon", type=float, default=MAX_EPSILON,
+                        help="Maximum per-client epsilon after adaptive adjustment.")
+    parser.add_argument("--dp-epsilon", type=float, default=DP_EPSILON,
+                        help="Fallback per-client epsilon before allocation overrides it.")
+    parser.add_argument("--dp-delta", type=float, default=DP_DELTA,
+                        help="Differential privacy delta.")
+    parser.add_argument("--dp-l2-norm-clip", type=float, default=DP_L2_NORM_CLIP,
+                        help="L2 clipping norm for DP noise calibration.")
+    parser.add_argument("--failure-prob", type=float, default=0.15,
+                        help="Per-round client failure probability. Use 0 for utility-only experiments.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -267,6 +281,13 @@ def main():
     args = parse_args()
     np.random.seed(args.seed)
     output_dir = create_output_dir(args)
+    global TOTAL_PRIVACY_BUDGET, MIN_EPSILON, MAX_EPSILON, DP_EPSILON, DP_DELTA, DP_L2_NORM_CLIP
+    TOTAL_PRIVACY_BUDGET = args.total_privacy_budget
+    MIN_EPSILON = args.min_epsilon
+    MAX_EPSILON = args.max_epsilon
+    DP_EPSILON = args.dp_epsilon
+    DP_DELTA = args.dp_delta
+    DP_L2_NORM_CLIP = args.dp_l2_norm_clip
     if args.experiment_suite == "baselines":
         if args.backend == "torch":
             from torch_baselines import run_torch_baseline_suite
@@ -287,6 +308,7 @@ def main():
     print(f"Total Privacy Budget: {TOTAL_PRIVACY_BUDGET}")
     print(f"Allocation Strategy: {PRIVACY_ALLOCATION_STRATEGY}")
     print(f"DP Parameters: Epsilon={DP_EPSILON}, Delta={DP_DELTA}, L2_Norm_Clip={DP_L2_NORM_CLIP}")
+    print(f"Epsilon bounds: min={MIN_EPSILON}, max={MAX_EPSILON}. Failure probability={args.failure_prob}")
     # 初始化隐私预算分配器
     privacy_allocator = PrivacyBudgetAllocator(TOTAL_PRIVACY_BUDGET, PRIVACY_ALLOCATION_STRATEGY)
 
@@ -444,7 +466,7 @@ def main():
         round_client_zkip_status = []
         round_client_epsilon_list = [] # 本轮每个客户端的隐私预算
         for idx, client in enumerate(clients):
-            if client.simulate_failure(probability=0.15): 
+            if client.simulate_failure(probability=args.failure_prob): 
                 round_client_update_norms.append(None)
                 round_client_ebcd_stats.append((None, None, None))
                 round_client_zkip_status.append(None)
