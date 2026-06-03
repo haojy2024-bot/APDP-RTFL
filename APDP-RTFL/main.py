@@ -78,6 +78,14 @@ def parse_args():
                         help="L2 clipping norm for DP noise calibration.")
     parser.add_argument("--failure-prob", type=float, default=0.15,
                         help="Per-round client failure probability. Use 0 for utility-only experiments.")
+    parser.add_argument("--apdp-warmup-rounds", type=int, default=20,
+                        help="Rounds before APDP adaptive epsilon adjustment starts.")
+    parser.add_argument("--adaptive-increase-factor", type=float, default=1.10,
+                        help="APDP epsilon multiplier for above-average clients.")
+    parser.add_argument("--adaptive-decrease-factor", type=float, default=0.90,
+                        help="APDP epsilon multiplier for below-average clients.")
+    parser.add_argument("--disable-compute-epoch-scaling", action="store_true",
+                        help="Disable heterogeneous compute local-epoch scaling while keeping epsilon compensation.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -92,9 +100,13 @@ def create_output_dir(args):
 
 # 隐私预算分配器
 class PrivacyBudgetAllocator:
-    def __init__(self, total_budget, strategy="hybrid"):
+    def __init__(self, total_budget, strategy="hybrid", warmup_rounds=20,
+                 increase_factor=1.10, decrease_factor=0.90):
         self.total_budget = total_budget
         self.strategy = strategy
+        self.warmup_rounds = warmup_rounds
+        self.increase_factor = increase_factor
+        self.decrease_factor = decrease_factor
         self.clients_statistics = {} # 存储客户端统计信息；历史记录
         self.last_round_contributions = {} # 上一轮动态贡献
     # 计算数据质量分数（基于类别分布的熵）
@@ -196,7 +208,7 @@ class PrivacyBudgetAllocator:
 
     # 基于历史表现自适应调整隐私预算
     def adaptive_adjustment(self, clients, previous_allocations, round_num):
-        if round_num < 2:  # 至少需要两轮数据才能调整
+        if round_num <= self.warmup_rounds:
             return previous_allocations.copy()
         # 简单的调整策略： 基于客户端的历史贡献
         new_allocations = previous_allocations.copy()
@@ -235,9 +247,9 @@ class PrivacyBudgetAllocator:
                               if len(s['contribution_history']) >= 3]
                 global_avg = np.mean(all_recent) if all_recent else recent_avg
                 if recent_avg > global_avg * 1.05: # 贡献显著高于平均
-                    new_allocations[i] = min(MAX_EPSILON, epsilon * 1.25)
+                    new_allocations[i] = min(MAX_EPSILON, epsilon * self.increase_factor)
                 else: # 贡献显著低于平均
-                    new_allocations[i] = max(MIN_EPSILON, epsilon * 0.75)
+                    new_allocations[i] = max(MIN_EPSILON, epsilon * self.decrease_factor)
         # 确保总预算不变
         total_allocated = sum(new_allocations.values())
         if total_allocated > 0:
@@ -263,6 +275,8 @@ class HeterogeneousComputeAdapter:
 
     def get_effective_epochs(self, client_idx, base_epochs):
         """根据算力动态降低本地训练轮次（主计算开销来源）"""
+        if getattr(self, "disable_epoch_scaling", False):
+            return base_epochs
         cap = self.capabilities.get(client_idx, 1.0)
         effective = max(1, int(base_epochs * cap * 1.1))  # 轻微上浮避免过低
         return effective
@@ -309,8 +323,21 @@ def main():
     print(f"Allocation Strategy: {PRIVACY_ALLOCATION_STRATEGY}")
     print(f"DP Parameters: Epsilon={DP_EPSILON}, Delta={DP_DELTA}, L2_Norm_Clip={DP_L2_NORM_CLIP}")
     print(f"Epsilon bounds: min={MIN_EPSILON}, max={MAX_EPSILON}. Failure probability={args.failure_prob}")
+    print(
+        "APDP tuning: "
+        f"warmup_rounds={args.apdp_warmup_rounds}, "
+        f"increase_factor={args.adaptive_increase_factor}, "
+        f"decrease_factor={args.adaptive_decrease_factor}, "
+        f"disable_compute_epoch_scaling={args.disable_compute_epoch_scaling}"
+    )
     # 初始化隐私预算分配器
-    privacy_allocator = PrivacyBudgetAllocator(TOTAL_PRIVACY_BUDGET, PRIVACY_ALLOCATION_STRATEGY)
+    privacy_allocator = PrivacyBudgetAllocator(
+        TOTAL_PRIVACY_BUDGET,
+        PRIVACY_ALLOCATION_STRATEGY,
+        warmup_rounds=args.apdp_warmup_rounds,
+        increase_factor=args.adaptive_increase_factor,
+        decrease_factor=args.adaptive_decrease_factor,
+    )
 
     X_train_full, y_train_full, X_test, y_test, feature_names, classes, presplit_client_data = load_experiment_data(
         dataset_name=args.dataset,
@@ -371,6 +398,7 @@ def main():
         client_val_sets.append((X_c_val, y_c_val))
     # 新增：异构算力适配器
     compute_adapter = HeterogeneousComputeAdapter()
+    compute_adapter.disable_epoch_scaling = args.disable_compute_epoch_scaling
     # 为所有客户端分配计算能力（可以自定义，也可以随机模拟）
     capabilities = compute_adapter.assign_capabilities(args.num_clients)
     # 将计算能力绑定到每个客户端对象上

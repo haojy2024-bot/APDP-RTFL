@@ -28,7 +28,9 @@ BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl", "dp_rtfl", "apdp_rtfl")
 class PrivacyRuntimeConfig:
     def __init__(self, total_budget=TOTAL_PRIVACY_BUDGET, min_epsilon=MIN_EPSILON,
                  max_epsilon=MAX_EPSILON, dp_epsilon=DP_EPSILON, dp_delta=DP_DELTA,
-                 dp_l2_norm_clip=DP_L2_NORM_CLIP, failure_prob=0.15):
+                 dp_l2_norm_clip=DP_L2_NORM_CLIP, failure_prob=0.15,
+                 apdp_warmup_rounds=20, adaptive_increase_factor=1.10,
+                 adaptive_decrease_factor=0.90, disable_compute_epoch_scaling=False):
         self.total_budget = total_budget
         self.min_epsilon = min_epsilon
         self.max_epsilon = max_epsilon
@@ -36,6 +38,10 @@ class PrivacyRuntimeConfig:
         self.dp_delta = dp_delta
         self.dp_l2_norm_clip = dp_l2_norm_clip
         self.failure_prob = failure_prob
+        self.apdp_warmup_rounds = apdp_warmup_rounds
+        self.adaptive_increase_factor = adaptive_increase_factor
+        self.adaptive_decrease_factor = adaptive_decrease_factor
+        self.disable_compute_epoch_scaling = disable_compute_epoch_scaling
 
 
 def make_privacy_config(args):
@@ -47,6 +53,10 @@ def make_privacy_config(args):
         dp_delta=args.dp_delta,
         dp_l2_norm_clip=args.dp_l2_norm_clip,
         failure_prob=args.failure_prob,
+        apdp_warmup_rounds=args.apdp_warmup_rounds,
+        adaptive_increase_factor=args.adaptive_increase_factor,
+        adaptive_decrease_factor=args.adaptive_decrease_factor,
+        disable_compute_epoch_scaling=args.disable_compute_epoch_scaling,
     )
 
 
@@ -146,8 +156,8 @@ def _assign_capabilities(num_clients):
     return {i: default_dist[i] for i in range(num_clients)}
 
 
-def _effective_epochs(client_idx, base_epochs, capabilities, enabled):
-    if not enabled:
+def _effective_epochs(client_idx, base_epochs, capabilities, enabled, privacy_config):
+    if not enabled or privacy_config.disable_compute_epoch_scaling:
         return base_epochs
     cap = capabilities.get(client_idx, 1.0)
     return max(1, int(base_epochs * cap * 1.1))
@@ -192,8 +202,8 @@ def _allocate_budget(clients, active_indices, capabilities, dynamic, privacy_con
     return {idx: (weights[idx] / total_weight) * privacy_config.total_budget for idx in active_indices}
 
 
-def _adaptive_adjust(clients, previous_allocations, contribution_history, privacy_config):
-    if not contribution_history:
+def _adaptive_adjust(clients, previous_allocations, round_num, privacy_config):
+    if round_num <= privacy_config.apdp_warmup_rounds:
         return previous_allocations.copy()
     scores = {}
     for i, epsilon in previous_allocations.items():
@@ -204,9 +214,9 @@ def _adaptive_adjust(clients, previous_allocations, contribution_history, privac
     adjusted = previous_allocations.copy()
     for i, epsilon in previous_allocations.items():
         if scores.get(i, 0.0) > global_avg * 1.05:
-            adjusted[i] = min(privacy_config.max_epsilon, epsilon * 1.25)
+            adjusted[i] = min(privacy_config.max_epsilon, epsilon * privacy_config.adaptive_increase_factor)
         else:
-            adjusted[i] = max(privacy_config.min_epsilon, epsilon * 0.75)
+            adjusted[i] = max(privacy_config.min_epsilon, epsilon * privacy_config.adaptive_decrease_factor)
     total = sum(adjusted.values())
     if total > 0:
         scale = privacy_config.total_budget / total
@@ -399,7 +409,7 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
         if config["dynamic_privacy"] and round_num > 1:
-            current_allocations = _adaptive_adjust(clients, current_allocations, contribution_history, privacy_config)
+            current_allocations = _adaptive_adjust(clients, current_allocations, round_num, privacy_config)
 
         global_params = {k: np.copy(v) for k, v in server.global_model_parameters.items()}
         client_updates = []
@@ -425,7 +435,7 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
             client.dp_epsilon = max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, effective_epsilon))
             round_epsilons.append(client.dp_epsilon)
             effective_epochs = _effective_epochs(
-                idx, args.client_epochs, capabilities, config["compute_adapter"]
+                idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config
             )
             client.set_global_model_parameters(global_params)
             delta, proof = client.train(
@@ -608,7 +618,11 @@ def run_baseline_suite(args, output_dir):
         f"min_epsilon={privacy_config.min_epsilon}, "
         f"max_epsilon={privacy_config.max_epsilon}, "
         f"dp_l2_norm_clip={privacy_config.dp_l2_norm_clip}, "
-        f"failure_prob={privacy_config.failure_prob}"
+        f"failure_prob={privacy_config.failure_prob}, "
+        f"apdp_warmup_rounds={privacy_config.apdp_warmup_rounds}, "
+        f"adaptive_increase_factor={privacy_config.adaptive_increase_factor}, "
+        f"adaptive_decrease_factor={privacy_config.adaptive_decrease_factor}, "
+        f"disable_compute_epoch_scaling={privacy_config.disable_compute_epoch_scaling}"
     )
 
     X_train_full, y_train_full, X_test, y_test, _, classes, presplit_client_data = load_experiment_data(

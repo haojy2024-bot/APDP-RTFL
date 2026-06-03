@@ -257,7 +257,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
         if config["dynamic_privacy"] and round_num > 1:
-            current_allocations = _adaptive_adjust(clients, current_allocations, contribution_history, privacy_config)
+            current_allocations = _adaptive_adjust(clients, current_allocations, round_num, privacy_config)
 
         global_params = {k: np.copy(v) for k, v in server.global_model_parameters.items()}
         client_updates = []
@@ -282,7 +282,9 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
             )
             client.dp_epsilon = max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, effective_epsilon))
             round_epsilons.append(client.dp_epsilon)
-            effective_epochs = _effective_epochs(idx, args.client_epochs, capabilities, config["compute_adapter"])
+            effective_epochs = _effective_epochs(
+                idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config
+            )
             delta, proof = client.train(
                 global_params=global_params,
                 epochs=effective_epochs,
@@ -374,7 +376,11 @@ def run_torch_baseline_suite(args, output_dir):
         f"min_epsilon={privacy_config.min_epsilon}, "
         f"max_epsilon={privacy_config.max_epsilon}, "
         f"dp_l2_norm_clip={privacy_config.dp_l2_norm_clip}, "
-        f"failure_prob={privacy_config.failure_prob}"
+        f"failure_prob={privacy_config.failure_prob}, "
+        f"apdp_warmup_rounds={privacy_config.apdp_warmup_rounds}, "
+        f"adaptive_increase_factor={privacy_config.adaptive_increase_factor}, "
+        f"adaptive_decrease_factor={privacy_config.adaptive_decrease_factor}, "
+        f"disable_compute_epoch_scaling={privacy_config.disable_compute_epoch_scaling}"
     )
 
     X_train_full, y_train_full, X_test, y_test, _, classes, presplit_client_data = load_experiment_data(
