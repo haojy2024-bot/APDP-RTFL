@@ -75,7 +75,7 @@ class FLClient:
             noisy_delta_params[key] = clipped_delta + noise
         return noisy_delta_params
 
-    def train(self, epochs):
+    def train(self, epochs, use_dp=True, fedprox_mu=0.0, global_params=None):
         #记录before
         if self.X_val is not None and self.y_val is not None and len(np.unique(self.y_val)) > 0 :
             # 记录训练前的验证指标
@@ -92,6 +92,9 @@ class FLClient:
         earlystop = EarlyStopping(mode='min', patience=self.earlystop_patience)
         for epoch in range(epochs):
             self.model.partial_fit(self.X_train, self.y_train)
+            if fedprox_mu > 0 and global_params is not None:
+                self.model.coef_ -= fedprox_mu * (self.model.coef_ - global_params['coef_'])
+                self.model.intercept_ -= fedprox_mu * (self.model.intercept_ - global_params['intercept_'])
             # Early stopping: check validation loss if validation data is provided
             if self.X_val is not None and self.y_val is not None and len(np.unique(self.y_val)) >= 2:
                 try:
@@ -113,7 +116,7 @@ class FLClient:
             self.dss.set_base_model_parameters({'coef_': np.zeros_like(current_params['coef_']), 
                                                 'intercept_': np.zeros_like(current_params['intercept_'])})
             delta_params = self.dss.compute_delta(current_params)
-        if self.dp_epsilon > 0:
+        if use_dp and self.dp_epsilon > 0:
             noisy_delta_params = self._apply_differential_privacy(delta_params)
         else:
             noisy_delta_params = delta_params

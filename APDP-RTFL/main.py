@@ -51,6 +51,13 @@ def parse_args():
                         help="实验结果根目录。默认保存到 results。")
     parser.add_argument("--run-name", default=None,
                         help="本次实验目录名。默认自动使用 数据集_YYYYmmdd_HHMMSS。")
+    parser.add_argument("--experiment-suite", default="single",
+                        choices=["single", "baselines"],
+                        help="single runs the current APDP-RTFL experiment; baselines runs the core comparison suite.")
+    parser.add_argument("--methods", default="all",
+                        help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,dp_rtfl,apdp_rtfl.")
+    parser.add_argument("--fedprox-mu", type=float, default=0.01,
+                        help="FedProx proximal coefficient. Default: 0.01.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -254,6 +261,10 @@ def main():
     args = parse_args()
     np.random.seed(args.seed)
     output_dir = create_output_dir(args)
+    if args.experiment_suite == "baselines":
+        from baselines import run_baseline_suite
+        run_baseline_suite(args, output_dir)
+        return
     print("Starting RTFL Simulation with Differential Privacy...")
     print(f"Dataset: {args.dataset}")
     print(f"Data root: {args.data_root}")
