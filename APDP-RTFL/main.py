@@ -52,10 +52,10 @@ def parse_args():
     parser.add_argument("--run-name", default=None,
                         help="本次实验目录名。默认自动使用 数据集_YYYYmmdd_HHMMSS。")
     parser.add_argument("--experiment-suite", default="single",
-                        choices=["single", "baselines"],
-                        help="single runs the current APDP-RTFL experiment; baselines runs the core comparison suite.")
+                        choices=["single", "baselines", "participation", "privacy_sensitivity"],
+                        help="single runs APDP-RTFL; baselines, participation, and privacy_sensitivity run comparison suites.")
     parser.add_argument("--methods", default="all",
-                        help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,dp_rtfl,apdp_rtfl.")
+                        help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,global_dp,dp_rtfl,apdp_rtfl.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
                         help="FedProx proximal coefficient. Default: 0.01.")
     parser.add_argument("--backend", default="sklearn", choices=["sklearn", "torch"],
@@ -86,6 +86,14 @@ def parse_args():
                         help="APDP epsilon multiplier for below-average clients.")
     parser.add_argument("--disable-compute-epoch-scaling", action="store_true",
                         help="Disable heterogeneous compute local-epoch scaling while keeping epsilon compensation.")
+    parser.add_argument("--participation-rate", type=float, default=0.6,
+                        help="Client participation ratio for --experiment-suite participation.")
+    parser.add_argument("--participation-policies", default="all,random,apdp_score",
+                        help="Participation policies: all,random,apdp_score.")
+    parser.add_argument("--privacy-budgets", default="20,50,80,100",
+                        help="Comma-separated total privacy budgets for privacy sensitivity experiments.")
+    parser.add_argument("--privacy-sensitivity-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
+                        help="Methods for privacy sensitivity experiments.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -302,13 +310,20 @@ def main():
     DP_EPSILON = args.dp_epsilon
     DP_DELTA = args.dp_delta
     DP_L2_NORM_CLIP = args.dp_l2_norm_clip
-    if args.experiment_suite == "baselines":
+    if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity"}:
         if args.backend == "torch":
             from torch_baselines import run_torch_baseline_suite
+            if args.experiment_suite != "baselines":
+                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity suites.")
             run_torch_baseline_suite(args, output_dir)
         else:
-            from baselines import run_baseline_suite
-            run_baseline_suite(args, output_dir)
+            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite
+            if args.experiment_suite == "baselines":
+                run_baseline_suite(args, output_dir)
+            elif args.experiment_suite == "participation":
+                run_participation_suite(args, output_dir)
+            else:
+                run_privacy_sensitivity_suite(args, output_dir)
         return
     if args.backend == "torch":
         from torch_baselines import run_torch_baseline_suite
@@ -644,39 +659,39 @@ def main():
     np.save(os.path.join(output_dir, 'per_client_epsilon.npy'), np.array(per_client_epsilon, dtype=object)) # 保存隐私预算分配
     # --- Save plots for research ---
     charts.plot_global_metrics(rounds, accuracies, f1_scores, aucs)
-    plt.savefig(os.path.join(output_dir, 'global_metrics.png'))
+    charts.save_figure(os.path.join(output_dir, 'global_metrics.png'))
     plt.close()
     charts.plot_ebcd_stats(rounds, ebcd_variances, ebcd_kurtoses, ebcd_skewnesses)
-    plt.savefig(os.path.join(output_dir, 'ebcd_stats.png'))
+    charts.save_figure(os.path.join(output_dir, 'ebcd_stats.png'))
     plt.close()
     # For server status, encode status as int for plotting
     status_map = {s: i for i, s in enumerate(sorted(set(server_statuses)))}
     status_ints = [status_map[s] for s in server_statuses]
     charts.plot_server_status(rounds, status_ints, coordinator_ids)
-    plt.savefig(os.path.join(output_dir, 'server_status.png'))
+    charts.save_figure(os.path.join(output_dir, 'server_status.png'))
     plt.close()
     charts.plot_dp_noise_scale(rounds, dp_noise_scales)
-    plt.savefig(os.path.join(output_dir, 'dp_noise_scale.png'))
+    charts.save_figure(os.path.join(output_dir, 'dp_noise_scale.png'))
     plt.close()
     charts.plot_agg_client_counts(rounds, agg_client_counts)
-    plt.savefig(os.path.join(output_dir, 'agg_client_counts.png'))
+    charts.save_figure(os.path.join(output_dir, 'agg_client_counts.png'))
     plt.close()
     charts.plot_zkip_failures(rounds, zkip_failures)
-    plt.savefig(os.path.join(output_dir, 'zkip_failures.png'))
+    charts.save_figure(os.path.join(output_dir, 'zkip_failures.png'))
     plt.close()
     charts.plot_delta_norm(rounds, delta_norms)
-    plt.savefig(os.path.join(output_dir, 'delta_norm.png'))
+    charts.save_figure(os.path.join(output_dir, 'delta_norm.png'))
     plt.close()
     charts.plot_ebcd_alerts(rounds, ebcd_alerts)
-    plt.savefig(os.path.join(output_dir, 'ebcd_alerts.png'))
+    charts.save_figure(os.path.join(output_dir, 'ebcd_alerts.png'))
     plt.close()
     charts.plot_tcm_state_count(rounds, tcm_counts)
-    plt.savefig(os.path.join(output_dir, 'tcm_state_count.png'))
+    charts.save_figure(os.path.join(output_dir, 'tcm_state_count.png'))
     plt.close()
 
     # 隐私预算分配可视化
     def plot_privacy_budget_allocation(rounds, privacy_allocations, client_ids): #绘制隐私预算分配图
-        plt.figure(figsize=[12, 8])
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
         # 准备数据
         n_clients = len(client_ids)
         client_epsilon_history = [[] for _ in range(n_clients)]
@@ -694,7 +709,7 @@ def main():
                   f'Strategy:{PRIVACY_ALLOCATION_STRATEGY}, TOTAL_PRIVACY_BUDGET:{TOTAL_PRIVACY_BUDGET}')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        plt.savefig(os.path.join(output_dir, 'privacy_budget_allocation.png'))
+        charts.save_figure(os.path.join(output_dir, 'privacy_budget_allocation.png'))
         plt.close()
 
     #调用隐私预算分配可视化函数
@@ -711,7 +726,7 @@ def main():
                 epsilon_values.append(final_allocations.get(i,0))
                 data_sizes.append(len(client.y_train))
 
-        plt.figure(figsize=[10, 6])
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
         scatter = plt.scatter(data_qualities, epsilon_values, s=[s/10 for s in data_sizes],
                               alpha=0.7, c=data_sizes, cmap='viridis')
         plt.colorbar(scatter, label='Data Size')
@@ -728,7 +743,7 @@ def main():
             plt.legend()
 
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'epsilon_vs_data_quality.png'))
+        charts.save_figure(os.path.join(output_dir, 'epsilon_vs_data_quality.png'))
         plt.close()
 
     plot_epsilon_vs_data_quality(clients, current_epsilon_allocations)
@@ -739,11 +754,11 @@ def main():
         for _ in rounds:
             best_accs.append(server.earlystop.best_metric if server.earlystop.best_metric != -float('inf') else np.nan)
         charts.plot_early_stopping_metric(rounds, best_accs, metric_name="Best Validation Accuracy", ylabel="Accuracy")
-        plt.savefig(os.path.join(output_dir, 'earlystop_server_best_val_acc.png'))
+        charts.save_figure(os.path.join(output_dir, 'earlystop_server_best_val_acc.png'))
         plt.close()
     # --- Per-client plots ---
     charts.plot_per_client_update_norms(rounds, per_client_update_norms, client_ids)
-    plt.savefig(os.path.join(output_dir, 'per_client_update_norms.png'))
+    charts.save_figure(os.path.join(output_dir, 'per_client_update_norms.png'))
     plt.close()
     # Per-client EBCD stats: variance, kurtosis, skewness
     for stat_idx, stat_name in enumerate(['Variance', 'Kurtosis', 'Skewness']):
@@ -757,15 +772,15 @@ def main():
                     val = None
                 stat_data[c][r] = val
         charts.plot_per_client_ebcd_stats(rounds, stat_data, client_ids, stat_name)
-        plt.savefig(os.path.join(output_dir, f'per_client_ebcd_{stat_name.lower()}.png'))
+        charts.save_figure(os.path.join(output_dir, f'per_client_ebcd_{stat_name.lower()}.png'))
         plt.close()
     charts.plot_per_client_zkip_status(rounds, per_client_zkip_status, client_ids)
-    plt.savefig(os.path.join(output_dir, 'per_client_zkip_status.png'))
+    charts.save_figure(os.path.join(output_dir, 'per_client_zkip_status.png'))
     plt.close()
 
     # 每轮每个客户端的隐私预算可视化
     def plot_per_client_epsilon(rounds, per_client_epsilon, client_ids): # 绘制每个客户端的隐私预算变化
-        plt.figure(figsize=[12, 8])
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
         for client_idx in range(len(client_ids)):
             epsilon_history = []
             for round_idx in range(len(rounds)):
@@ -784,7 +799,7 @@ def main():
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'per_client_epsilon_dynamic_dp.png'))
+        charts.save_figure(os.path.join(output_dir, 'per_client_epsilon_dynamic_dp.png'))
         plt.close()
 
     plot_per_client_epsilon(rounds, per_client_epsilon, client_ids)

@@ -22,7 +22,9 @@ DP_DELTA = 1e-5
 DP_L2_NORM_CLIP = 1.0
 BASE_LEARNING_RATE = 0.01
 EARLYSTOP_PATIENCE = 3
-BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl", "dp_rtfl", "apdp_rtfl")
+BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
+PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 
 
 class PrivacyRuntimeConfig:
@@ -63,6 +65,7 @@ def make_privacy_config(args):
 METHOD_CONFIGS = {
     "fedavg": {
         "label": "FedAvg",
+        "dp_scope": "none",
         "use_dp": False,
         "dynamic_privacy": False,
         "compute_adapter": False,
@@ -73,6 +76,7 @@ METHOD_CONFIGS = {
     },
     "fedprox": {
         "label": "FedProx",
+        "dp_scope": "none",
         "use_dp": False,
         "dynamic_privacy": False,
         "compute_adapter": False,
@@ -83,7 +87,19 @@ METHOD_CONFIGS = {
     },
     "ldp_fl": {
         "label": "LDP-FL",
+        "dp_scope": "client",
         "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": False,
+    },
+    "global_dp": {
+        "label": "Global-DP",
+        "dp_scope": "server",
+        "use_dp": False,
         "dynamic_privacy": False,
         "compute_adapter": False,
         "use_zkip": False,
@@ -93,6 +109,7 @@ METHOD_CONFIGS = {
     },
     "dp_rtfl": {
         "label": "DP-RTFL",
+        "dp_scope": "client",
         "use_dp": True,
         "dynamic_privacy": False,
         "compute_adapter": False,
@@ -103,6 +120,7 @@ METHOD_CONFIGS = {
     },
     "apdp_rtfl": {
         "label": "APDP-RTFL",
+        "dp_scope": "client",
         "use_dp": True,
         "dynamic_privacy": True,
         "compute_adapter": True,
@@ -266,7 +284,29 @@ def _init_clients(train_val_data, num_features, classes, seed, privacy_config):
     return clients
 
 
-def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip):
+def _dp_noise_stddev(privacy_config, epsilon=None):
+    effective_epsilon = privacy_config.dp_epsilon if epsilon is None else epsilon
+    if effective_epsilon <= 0:
+        return 0.0
+    return (
+        privacy_config.dp_l2_norm_clip
+        * np.sqrt(2 * np.log(1.25 / privacy_config.dp_delta))
+        / effective_epsilon
+    )
+
+
+def _apply_server_dp_to_delta(delta, privacy_config):
+    total_norm = np.sqrt(sum(np.linalg.norm(v.flatten()) ** 2 for v in delta.values()))
+    clip_factor = min(1.0, privacy_config.dp_l2_norm_clip / (total_norm + 1e-6))
+    noise_stddev = _dp_noise_stddev(privacy_config, epsilon=privacy_config.total_budget)
+    noisy_delta = {}
+    for key, value in delta.items():
+        clipped = value * clip_factor
+        noisy_delta[key] = clipped + np.random.normal(0, noise_stddev, size=value.shape)
+    return noisy_delta, noise_stddev
+
+
+def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip, privacy_config=None, apply_server_dp=False):
     valid = []
     total_weight = 0
     aggregated_from = []
@@ -281,7 +321,7 @@ def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip):
         total_weight += data_size
         aggregated_from.append(client_id)
     if not valid or total_weight == 0:
-        return base_params, False, aggregated_from, zkip_failures
+        return base_params, False, aggregated_from, zkip_failures, 0.0
 
     aggregated_delta = {k: np.zeros_like(v) for k, v in valid[0][0].items()}
     for delta, data_size in valid:
@@ -289,15 +329,51 @@ def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip):
         for key in aggregated_delta:
             aggregated_delta[key] += delta[key] * weight
     next_params = {k: np.copy(v) for k, v in base_params.items()}
+    server_noise_scale = 0.0
+    if apply_server_dp and privacy_config is not None:
+        aggregated_delta, server_noise_scale = _apply_server_dp_to_delta(aggregated_delta, privacy_config)
     for key in aggregated_delta:
         next_params[key] += aggregated_delta[key]
-    return next_params, True, aggregated_from, zkip_failures
+    return next_params, True, aggregated_from, zkip_failures, server_noise_scale
 
 
 def _make_eval_server(method_name, client_ids, num_features, classes, params):
     server = FLServer(f"{method_name}_server", client_ids, num_features, classes=classes)
     server.global_model_parameters = {k: np.copy(v) for k, v in params.items()}
     return server
+
+
+def _parse_csv_list(value, allowed, name):
+    items = [item.strip().lower() for item in value.split(",") if item.strip()]
+    invalid = [item for item in items if item not in allowed]
+    if invalid:
+        raise ValueError(f"Unsupported {name}: {invalid}. Supported: {allowed}")
+    return items
+
+
+def _select_participants(policy, available_indices, clients, capabilities, contribution_scores, participation_rate, rng):
+    if not available_indices:
+        return []
+    if policy == "all":
+        return list(available_indices)
+    target_count = max(1, int(np.ceil(len(available_indices) * participation_rate)))
+    target_count = min(target_count, len(available_indices))
+    if policy == "random":
+        return sorted(rng.choice(available_indices, size=target_count, replace=False).tolist())
+    if policy != "apdp_score":
+        raise ValueError(f"Unsupported participation policy: {policy}")
+
+    max_size = max(len(clients[i].y_train) for i in available_indices) or 1
+    max_contribution = max(abs(contribution_scores.get(i, 0.0)) for i in available_indices) or 1.0
+    scores = []
+    for idx in available_indices:
+        data_score = len(clients[idx].y_train) / max_size
+        quality_score = _compute_data_quality_score(clients[idx].y_train)
+        compute_score = capabilities.get(idx, 1.0)
+        contribution_score = abs(contribution_scores.get(idx, 0.0)) / max_contribution
+        score = 0.35 * data_score + 0.25 * quality_score + 0.20 * compute_score + 0.20 * contribution_score
+        scores.append((score, idx))
+    return [idx for _, idx in sorted(scores, reverse=True)[:target_count]]
 
 
 def _save_method_artifacts(output_dir, method_name, result, client_ids):
@@ -316,6 +392,8 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
                 "auc_roc": result["aucs"][idx],
                 "round_duration": result["round_durations"][idx],
                 "agg_client_count": result["agg_client_counts"][idx],
+                "selected_client_count": result.get("selected_client_counts", [np.nan] * len(result["rounds"]))[idx],
+                "participation_policy": result.get("participation_policy", ""),
                 "dp_noise_scale": result["dp_noise_scales"][idx],
                 "zkip_failures": result["zkip_failures"][idx],
                 "ebcd_alert": result["ebcd_alerts"][idx],
@@ -338,32 +416,45 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
     np.save(os.path.join(output_dir, "per_client_epsilon.npy"), np.array(result["per_client_epsilon"], dtype=object))
 
     charts.plot_global_metrics(result["rounds"], result["accuracies"], result["f1_scores"], result["aucs"])
-    plt.savefig(os.path.join(output_dir, "global_metrics.png"))
+    charts.save_figure(os.path.join(output_dir, "global_metrics.png"))
     plt.close()
     charts.plot_dp_noise_scale(result["rounds"], result["dp_noise_scales"])
-    plt.savefig(os.path.join(output_dir, "dp_noise_scale.png"))
+    charts.save_figure(os.path.join(output_dir, "dp_noise_scale.png"))
     plt.close()
     charts.plot_agg_client_counts(result["rounds"], result["agg_client_counts"])
-    plt.savefig(os.path.join(output_dir, "agg_client_counts.png"))
+    charts.save_figure(os.path.join(output_dir, "agg_client_counts.png"))
     plt.close()
     charts.plot_zkip_failures(result["rounds"], result["zkip_failures"])
-    plt.savefig(os.path.join(output_dir, "zkip_failures.png"))
+    charts.save_figure(os.path.join(output_dir, "zkip_failures.png"))
     plt.close()
     charts.plot_delta_norm(result["rounds"], result["delta_norms"])
-    plt.savefig(os.path.join(output_dir, "delta_norm.png"))
+    charts.save_figure(os.path.join(output_dir, "delta_norm.png"))
     plt.close()
     charts.plot_ebcd_alerts(result["rounds"], result["ebcd_alerts"])
-    plt.savefig(os.path.join(output_dir, "ebcd_alerts.png"))
+    charts.save_figure(os.path.join(output_dir, "ebcd_alerts.png"))
     plt.close()
     charts.plot_tcm_state_count(result["rounds"], result["tcm_counts"])
-    plt.savefig(os.path.join(output_dir, "tcm_state_count.png"))
+    charts.save_figure(os.path.join(output_dir, "tcm_state_count.png"))
     plt.close()
     charts.plot_per_client_update_norms(result["rounds"], result["per_client_update_norms"], client_ids)
-    plt.savefig(os.path.join(output_dir, "per_client_update_norms.png"))
+    charts.save_figure(os.path.join(output_dir, "per_client_update_norms.png"))
     plt.close()
 
 
-def _run_single_method(method_name, args, train_val_data, X_test, y_test, classes, failure_plan, output_dir, privacy_config):
+def _run_single_method(
+    method_name,
+    args,
+    train_val_data,
+    X_test,
+    y_test,
+    classes,
+    failure_plan,
+    output_dir,
+    privacy_config,
+    participation_policy="all",
+    participation_rate=1.0,
+    label_suffix="",
+):
     config = METHOD_CONFIGS[method_name]
     num_features = X_test.shape[1]
     clients = _init_clients(train_val_data, num_features, classes, args.seed, privacy_config)
@@ -384,7 +475,8 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
 
     result = {
         "method": method_name,
-        "label": config["label"],
+        "label": f"{config['label']}{label_suffix}",
+        "participation_policy": participation_policy,
         "rounds": [],
         "accuracies": [],
         "balanced_accuracies": [],
@@ -394,6 +486,7 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
         "aucs": [],
         "round_durations": [],
         "agg_client_counts": [],
+        "selected_client_counts": [],
         "dp_noise_scales": [],
         "zkip_failures": [],
         "delta_norms": [],
@@ -406,6 +499,8 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
     }
 
     print(f"\n=== Running {config['label']} ({method_name}) ===")
+    rng = np.random.default_rng(args.seed + 5000)
+    contribution_scores = {idx: 0.0 for idx in range(len(clients))}
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
         if config["dynamic_privacy"] and round_num > 1:
@@ -419,9 +514,21 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
         round_epsilons = []
         round_noise_scales = []
         round_delta_norm = 0.0
+        available_indices = [idx for idx in range(len(clients)) if not failure_plan[round_num - 1][idx]]
+        selected_indices = set(
+            _select_participants(
+                participation_policy,
+                available_indices,
+                clients,
+                capabilities,
+                contribution_scores,
+                participation_rate,
+                rng,
+            )
+        )
 
         for idx, client in enumerate(clients):
-            if failure_plan[round_num - 1][idx]:
+            if failure_plan[round_num - 1][idx] or idx not in selected_indices:
                 round_update_norms.append(None)
                 round_ebcd_stats.append((None, None, None))
                 round_zkip_status.append(None)
@@ -440,7 +547,7 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
             client.set_global_model_parameters(global_params)
             delta, proof = client.train(
                 epochs=effective_epochs,
-                use_dp=config["use_dp"],
+                use_dp=config["dp_scope"] == "client",
                 fedprox_mu=args.fedprox_mu if config["fedprox"] else 0.0,
                 global_params=global_params,
             )
@@ -461,14 +568,19 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
             zkip_ok = server.zkip.verify_proof(delta, proof) if config["use_zkip"] else True
             round_zkip_status.append(zkip_ok)
             client_updates.append((delta, proof, client.client_id, len(client.y_train)))
-            if config["use_dp"] and client.dp_epsilon > 0:
+            if config["dp_scope"] == "client" and client.dp_epsilon > 0:
                 noise_stddev = (client.dp_l2_norm_clip * np.sqrt(2 * np.log(1.25 / client.dp_delta))) / client.dp_epsilon
             else:
                 noise_stddev = 0.0
             round_noise_scales.append(noise_stddev)
 
-        server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures = _aggregate_deltas(
-            server.global_model_parameters, client_updates, config["use_zkip"], server.zkip
+        server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_deltas(
+            server.global_model_parameters,
+            client_updates,
+            config["use_zkip"],
+            server.zkip,
+            privacy_config=privacy_config,
+            apply_server_dp=config["dp_scope"] == "server",
         )
         ebcd_alert = 1 if config["use_ebcd"] and server.ebcd.check_for_corruption(server.global_model_parameters) else 0
         if config["use_tcm"]:
@@ -499,7 +611,11 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
         result["aucs"].append(_metric_value(metrics.get("auc_roc")))
         result["round_durations"].append(duration)
         result["agg_client_counts"].append(len(aggregated_from))
-        result["dp_noise_scales"].append(float(np.mean(round_noise_scales)) if round_noise_scales else 0.0)
+        result["selected_client_counts"].append(len(selected_indices))
+        result["dp_noise_scales"].append(
+            server_noise_scale if config["dp_scope"] == "server"
+            else float(np.mean(round_noise_scales)) if round_noise_scales else 0.0
+        )
         result["zkip_failures"].append(zkip_failures)
         result["delta_norms"].append(avg_delta_norm)
         result["ebcd_alerts"].append(ebcd_alert)
@@ -519,6 +635,14 @@ def _run_single_method(method_name, args, train_val_data, X_test, y_test, classe
                 for idx in range(len(clients))
             }
         )
+        contribution_scores = {
+            idx: (
+                round_update_norms[idx]
+                if idx < len(round_update_norms) and round_update_norms[idx] is not None
+                else contribution_scores.get(idx, 0.0)
+            )
+            for idx in range(len(clients))
+        }
         print(
             f"{config['label']} round {round_num}/{args.num_rounds}: "
             f"Acc={result['accuracies'][-1]:.3f}, F1={result['f1_scores'][-1]:.3f}, "
@@ -552,6 +676,9 @@ def _final_metric_row(method_name, result):
         "final_auc_roc": result["aucs"][-1] if result["aucs"] else np.nan,
         "avg_round_time": np.nanmean(result["round_durations"]) if result["round_durations"] else np.nan,
         "avg_dp_noise_scale": np.nanmean(result["dp_noise_scales"]) if result["dp_noise_scales"] else np.nan,
+        "avg_selected_client_count": np.nanmean(result.get("selected_client_counts", [])) if result.get("selected_client_counts") else np.nan,
+        "avg_agg_client_count": np.nanmean(result["agg_client_counts"]) if result["agg_client_counts"] else np.nan,
+        "participation_policy": result.get("participation_policy", ""),
         "total_zkip_failures": np.nansum(result["zkip_failures"]) if result["zkip_failures"] else 0,
         "total_ebcd_alerts": np.nansum(result["ebcd_alerts"]) if result["ebcd_alerts"] else 0,
         "final_tcm_state_count": result["tcm_counts"][-1] if result["tcm_counts"] else 0,
@@ -575,6 +702,8 @@ def _save_suite_summary(output_dir, method_results):
                     "auc_roc": result["aucs"][idx],
                     "dp_noise_scale": result["dp_noise_scales"][idx],
                     "agg_client_count": result["agg_client_counts"][idx],
+                    "selected_client_count": result.get("selected_client_counts", [np.nan] * len(result["rounds"]))[idx],
+                    "participation_policy": result.get("participation_policy", ""),
                     "zkip_failures": result["zkip_failures"][idx],
                     "ebcd_alert": result["ebcd_alerts"][idx],
                     "tcm_state_count": result["tcm_counts"][idx],
@@ -588,7 +717,7 @@ def _save_suite_summary(output_dir, method_results):
             writer.writeheader()
             writer.writerows(rows)
 
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=charts.FIGSIZE_COMPARISON)
     for metric_idx, (metric_key, title) in enumerate(
         (("accuracies", "Accuracy"), ("f1_scores", "Macro-F1"), ("balanced_accuracies", "Balanced Accuracy")),
         start=1,
@@ -603,28 +732,11 @@ def _save_suite_summary(output_dir, method_results):
         if metric_idx == 3:
             plt.xlabel("Round")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "baseline_comparison.png"))
+    charts.save_figure(os.path.join(output_dir, "baseline_comparison.png"))
     plt.close()
 
 
-def run_baseline_suite(args, output_dir):
-    methods = _parse_methods(args.methods)
-    privacy_config = make_privacy_config(args)
-    print(f"Running baseline suite: {methods}")
-    print(f"Results will be saved to: {output_dir}")
-    print(
-        "Privacy config: "
-        f"total_budget={privacy_config.total_budget}, "
-        f"min_epsilon={privacy_config.min_epsilon}, "
-        f"max_epsilon={privacy_config.max_epsilon}, "
-        f"dp_l2_norm_clip={privacy_config.dp_l2_norm_clip}, "
-        f"failure_prob={privacy_config.failure_prob}, "
-        f"apdp_warmup_rounds={privacy_config.apdp_warmup_rounds}, "
-        f"adaptive_increase_factor={privacy_config.adaptive_increase_factor}, "
-        f"adaptive_decrease_factor={privacy_config.adaptive_decrease_factor}, "
-        f"disable_compute_epoch_scaling={privacy_config.disable_compute_epoch_scaling}"
-    )
-
+def _load_suite_data(args, privacy_config):
     X_train_full, y_train_full, X_test, y_test, _, classes, presplit_client_data = load_experiment_data(
         dataset_name=args.dataset,
         data_root=args.data_root,
@@ -633,8 +745,7 @@ def run_baseline_suite(args, output_dir):
         emnist_split=args.emnist_split,
     )
     if X_train_full is None:
-        print("Failed to load data. Exiting.")
-        return
+        raise RuntimeError("Failed to load data.")
     if presplit_client_data is not None:
         client_datasets = presplit_client_data
         args.num_clients = len(client_datasets)
@@ -652,6 +763,87 @@ def run_baseline_suite(args, output_dir):
     train_val_data = _split_train_val(client_datasets, classes, args.seed)
     rng = np.random.default_rng(args.seed + 2026)
     failure_plan = rng.random((args.num_rounds, args.num_clients)) < privacy_config.failure_prob
+    return train_val_data, X_test, y_test, classes, failure_plan
+
+
+def _write_csv(path, rows):
+    fieldnames = list(rows[0].keys()) if rows else ["name"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _plot_group_metric(summary_rows, group_key, metric_key, output_path, ylabel, title):
+    groups = {}
+    for row in summary_rows:
+        groups.setdefault(row[group_key], []).append(row)
+    plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+    for group, rows in groups.items():
+        rows = sorted(rows, key=lambda r: r["round"])
+        plt.plot([r["round"] for r in rows], [r[metric_key] for r in rows], marker="o", label=str(group))
+    plt.xlabel("Round")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    charts.save_figure(output_path)
+    plt.close()
+
+
+def _plot_final_metric(final_rows, x_key, metric_key, output_path, xlabel, ylabel, title):
+    rows = sorted(final_rows, key=lambda r: r[x_key])
+    plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+    plt.plot([r[x_key] for r in rows], [r[metric_key] for r in rows], marker="o")
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    charts.save_figure(output_path)
+    plt.close()
+
+
+def _plot_final_metric_by_method(final_rows, metric_key, output_path, ylabel, title):
+    methods = sorted({row["method"] for row in final_rows})
+    plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+    for method_name in methods:
+        rows = sorted([row for row in final_rows if row["method"] == method_name], key=lambda r: r["budget"])
+        plt.plot([row["budget"] for row in rows], [row[metric_key] for row in rows], marker="o", label=method_name)
+    plt.xlabel("Total Privacy Budget")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    charts.save_figure(output_path)
+    plt.close()
+
+
+def _print_privacy_config(privacy_config):
+    print(
+        "Privacy config: "
+        f"total_budget={privacy_config.total_budget}, "
+        f"min_epsilon={privacy_config.min_epsilon}, "
+        f"max_epsilon={privacy_config.max_epsilon}, "
+        f"dp_l2_norm_clip={privacy_config.dp_l2_norm_clip}, "
+        f"failure_prob={privacy_config.failure_prob}, "
+        f"apdp_warmup_rounds={privacy_config.apdp_warmup_rounds}, "
+        f"adaptive_increase_factor={privacy_config.adaptive_increase_factor}, "
+        f"adaptive_decrease_factor={privacy_config.adaptive_decrease_factor}, "
+        f"disable_compute_epoch_scaling={privacy_config.disable_compute_epoch_scaling}"
+    )
+
+
+def run_baseline_suite(args, output_dir):
+    methods = _parse_methods(args.methods)
+    privacy_config = make_privacy_config(args)
+    print(f"Running baseline suite: {methods}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+
+    train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
 
     method_results = {}
     for method_name in methods:
@@ -669,3 +861,138 @@ def run_baseline_suite(args, output_dir):
         )
     _save_suite_summary(output_dir, method_results)
     print(f"Baseline suite artifacts saved to: {output_dir}")
+
+
+def run_participation_suite(args, output_dir):
+    policies = _parse_csv_list(args.participation_policies, PARTICIPATION_POLICIES, "participation policies")
+    privacy_config = make_privacy_config(args)
+    print(f"Running participation suite: {policies}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+    train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+
+    policy_results = {}
+    for policy in policies:
+        policy_output_dir = os.path.join(output_dir, f"participation_{policy}")
+        policy_results[policy] = _run_single_method(
+            "apdp_rtfl",
+            args,
+            train_val_data,
+            X_test,
+            y_test,
+            classes,
+            failure_plan,
+            policy_output_dir,
+            privacy_config,
+            participation_policy=policy,
+            participation_rate=args.participation_rate,
+            label_suffix=f" ({policy})",
+        )
+
+    summary_rows = []
+    final_rows = []
+    for policy, result in policy_results.items():
+        final_row = _final_metric_row(policy, result)
+        final_row["policy"] = policy
+        final_rows.append(final_row)
+        for idx, round_num in enumerate(result["rounds"]):
+            summary_rows.append(
+                {
+                    "policy": policy,
+                    "round": round_num,
+                    "accuracy": result["accuracies"][idx],
+                    "balanced_accuracy": result["balanced_accuracies"][idx],
+                    "f1_score": result["f1_scores"][idx],
+                    "selected_client_count": result["selected_client_counts"][idx],
+                    "agg_client_count": result["agg_client_counts"][idx],
+                    "dp_noise_scale": result["dp_noise_scales"][idx],
+                    "round_duration": result["round_durations"][idx],
+                }
+            )
+    _write_csv(os.path.join(output_dir, "participation_summary.csv"), summary_rows)
+    _write_csv(os.path.join(output_dir, "participation_final_metrics.csv"), final_rows)
+    _plot_group_metric(summary_rows, "policy", "accuracy", os.path.join(output_dir, "participation_accuracy.png"), "Accuracy", "Participation Policy Accuracy")
+    _plot_group_metric(summary_rows, "policy", "selected_client_count", os.path.join(output_dir, "participation_client_count.png"), "Selected Clients", "Participation Policy Client Count")
+    _plot_group_metric(summary_rows, "policy", "f1_score", os.path.join(output_dir, "participation_comparison.png"), "Macro-F1", "Participation Policy Macro-F1")
+    print(f"Participation suite artifacts saved to: {output_dir}")
+
+
+def _parse_float_list(value, name):
+    try:
+        return [float(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError(f"Invalid {name}: {value}") from exc
+
+
+def run_privacy_sensitivity_suite(args, output_dir):
+    budgets = _parse_float_list(args.privacy_budgets, "privacy budgets")
+    methods = _parse_csv_list(args.privacy_sensitivity_methods, PRIVACY_SENSITIVITY_METHODS, "privacy sensitivity methods")
+    print(f"Running privacy sensitivity suite: budgets={budgets}, methods={methods}")
+    print(f"Results will be saved to: {output_dir}")
+
+    summary_rows = []
+    final_rows = []
+    for budget in budgets:
+        original_budget = args.total_privacy_budget
+        args.total_privacy_budget = budget
+        privacy_config = make_privacy_config(args)
+        train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+        budget_results = {}
+        for method_name in methods:
+            method_output_dir = os.path.join(output_dir, f"budget_{budget:g}", method_name)
+            result = _run_single_method(
+                method_name,
+                args,
+                train_val_data,
+                X_test,
+                y_test,
+                classes,
+                failure_plan,
+                method_output_dir,
+                privacy_config,
+            )
+            budget_results[method_name] = result
+            final_row = _final_metric_row(method_name, result)
+            final_row["budget"] = budget
+            final_row["method"] = method_name
+            final_rows.append(final_row)
+            for idx, round_num in enumerate(result["rounds"]):
+                summary_rows.append(
+                    {
+                        "budget": budget,
+                        "method": method_name,
+                        "round": round_num,
+                        "accuracy": result["accuracies"][idx],
+                        "balanced_accuracy": result["balanced_accuracies"][idx],
+                        "f1_score": result["f1_scores"][idx],
+                        "dp_noise_scale": result["dp_noise_scales"][idx],
+                        "agg_client_count": result["agg_client_counts"][idx],
+                        "round_duration": result["round_durations"][idx],
+                    }
+                )
+        _save_suite_summary(os.path.join(output_dir, f"budget_{budget:g}"), budget_results)
+        args.total_privacy_budget = original_budget
+
+    _write_csv(os.path.join(output_dir, "privacy_sensitivity_summary.csv"), summary_rows)
+    _write_csv(os.path.join(output_dir, "privacy_sensitivity_final_metrics.csv"), final_rows)
+    _plot_final_metric_by_method(final_rows, "final_accuracy", os.path.join(output_dir, "privacy_budget_accuracy.png"), "Final Accuracy", "Accuracy vs Privacy Budget")
+    _plot_final_metric_by_method(final_rows, "avg_dp_noise_scale", os.path.join(output_dir, "privacy_budget_noise.png"), "Avg DP Noise Scale", "Noise vs Privacy Budget")
+
+    for method_name in methods:
+        rows = [row for row in final_rows if row["method"] == method_name]
+        _plot_final_metric(rows, "budget", "final_accuracy", os.path.join(output_dir, f"privacy_budget_accuracy_{method_name}.png"), "Total Privacy Budget", "Final Accuracy", f"{method_name} Accuracy vs Privacy Budget")
+        _plot_final_metric(rows, "budget", "avg_dp_noise_scale", os.path.join(output_dir, f"privacy_budget_noise_{method_name}.png"), "Total Privacy Budget", "Avg DP Noise Scale", f"{method_name} Noise vs Privacy Budget")
+
+    plt.figure(figsize=charts.FIGSIZE_RELATION)
+    for method_name in methods:
+        rows = sorted([row for row in final_rows if row["method"] == method_name], key=lambda r: r["budget"])
+        plt.plot([row["avg_dp_noise_scale"] for row in rows], [row["final_accuracy"] for row in rows], marker="o", label=method_name)
+    plt.xlabel("Avg DP Noise Scale")
+    plt.ylabel("Final Accuracy")
+    plt.title("Privacy-Utility Tradeoff")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    charts.save_figure(os.path.join(output_dir, "privacy_budget_tradeoff.png"))
+    plt.close()
+    print(f"Privacy sensitivity suite artifacts saved to: {output_dir}")

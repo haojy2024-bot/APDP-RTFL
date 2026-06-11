@@ -242,6 +242,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
         "aucs": [],
         "round_durations": [],
         "agg_client_counts": [],
+        "selected_client_counts": [],
         "dp_noise_scales": [],
         "zkip_failures": [],
         "delta_norms": [],
@@ -288,7 +289,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
             delta, proof = client.train(
                 global_params=global_params,
                 epochs=effective_epochs,
-                use_dp=config["use_dp"],
+                use_dp=config["dp_scope"] == "client",
                 fedprox_mu=args.fedprox_mu if config["fedprox"] else 0.0,
             )
             if delta is None:
@@ -305,14 +306,19 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
             zkip_ok = server.zkip.verify_proof(delta, proof) if config["use_zkip"] else True
             round_zkip_status.append(zkip_ok)
             client_updates.append((delta, proof, client.client_id, len(client.y_train)))
-            if config["use_dp"] and client.dp_epsilon > 0:
+            if config["dp_scope"] == "client" and client.dp_epsilon > 0:
                 noise_stddev = (client.dp_l2_norm_clip * np.sqrt(2 * np.log(1.25 / client.dp_delta))) / client.dp_epsilon
             else:
                 noise_stddev = 0.0
             round_noise_scales.append(noise_stddev)
 
-        server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures = _aggregate_deltas(
-            server.global_model_parameters, client_updates, config["use_zkip"], server.zkip
+        server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_deltas(
+            server.global_model_parameters,
+            client_updates,
+            config["use_zkip"],
+            server.zkip,
+            privacy_config=privacy_config,
+            apply_server_dp=config["dp_scope"] == "server",
         )
         ebcd_alert = 1 if config["use_ebcd"] and server.ebcd.check_for_corruption(server.global_model_parameters) else 0
         if config["use_tcm"]:
@@ -343,7 +349,11 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
         result["aucs"].append(_metric_value(metrics.get("auc_roc")))
         result["round_durations"].append(duration)
         result["agg_client_counts"].append(len(aggregated_from))
-        result["dp_noise_scales"].append(float(np.mean(round_noise_scales)) if round_noise_scales else 0.0)
+        result["selected_client_counts"].append(len(aggregated_from))
+        result["dp_noise_scales"].append(
+            server_noise_scale if config["dp_scope"] == "server"
+            else float(np.mean(round_noise_scales)) if round_noise_scales else 0.0
+        )
         result["zkip_failures"].append(zkip_failures)
         result["delta_norms"].append(avg_delta_norm)
         result["ebcd_alerts"].append(ebcd_alert)
