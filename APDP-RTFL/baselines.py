@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import kurtosis, skew, entropy
 from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from data_utils import load_experiment_data, split_data_for_clients
@@ -30,6 +30,8 @@ PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
 PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 POLLUTION_METHODS = ("apdp_rtfl",)
 FAIRNESS_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+CONTRIBUTION_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+SYNTHETIC_FAIRNESS_DATASETS = ("emnist", "femnist", "cifar10", "cifar100")
 
 
 class PrivacyRuntimeConfig:
@@ -172,6 +174,222 @@ def _compute_data_quality_score(y_data):
     return data_entropy / max_entropy if max_entropy > 0 else 0.0
 
 
+class SyntheticSensitiveAttributeAssigner:
+    def __init__(self, attrs="gender,age,region", profile="regulated"):
+        self.attrs = {item.strip().lower() for item in attrs.split(",") if item.strip()}
+        self.profile = profile
+
+    def assign(self, client_datasets):
+        rows = []
+        for idx, (_, y_data) in enumerate(client_datasets):
+            region_group = ("east", "central", "west")[idx % 3]
+            age_group = ("young", "middle", "old")[(idx // 2) % 3]
+            gender_group = "A" if idx % 2 == 0 else "B"
+            compute_level = {"east": "high", "central": "medium", "west": "low"}[region_group]
+            if age_group == "old" or region_group == "west":
+                data_quality = "noisy"
+            elif gender_group == "B":
+                data_quality = "biased"
+            else:
+                data_quality = "clean"
+            labels = np.asarray(y_data).astype(int)
+            rows.append(
+                {
+                    "client_idx": idx,
+                    "client_id": f"client_{idx}",
+                    "gender_group": gender_group if "gender" in self.attrs else "unspecified",
+                    "age_group": age_group if "age" in self.attrs else "unspecified",
+                    "region_group": region_group if "region" in self.attrs else "unspecified",
+                    "compute_level": compute_level,
+                    "data_quality": data_quality,
+                    "sample_count": len(labels),
+                    "class_coverage": len(np.unique(labels)) if len(labels) else 0,
+                }
+            )
+        return rows
+
+
+class SyntheticFairnessPressureApplier:
+    def __init__(self, seed=42):
+        self.rng = np.random.default_rng(seed)
+
+    def _filter_by_gender(self, X_data, y_data, metadata):
+        if metadata["gender_group"] != "B" or len(y_data) <= 2:
+            return X_data, y_data
+        labels = np.asarray(y_data).astype(int)
+        unique = np.unique(labels)
+        keep_classes = set(unique[:max(1, int(np.ceil(len(unique) * 0.7)))].tolist())
+        keep_mask = np.array([label in keep_classes for label in labels])
+        if keep_mask.sum() < max(2, int(len(labels) * 0.3)):
+            return X_data, y_data
+        return X_data[keep_mask], y_data[keep_mask]
+
+    def _filter_by_region(self, X_data, y_data, metadata):
+        region = metadata["region_group"]
+        if region == "central" or len(y_data) <= 2:
+            return X_data, y_data
+        labels = np.asarray(y_data).astype(int)
+        unique = np.unique(labels)
+        midpoint = max(1, len(unique) // 2)
+        preferred = set(unique[:midpoint].tolist()) if region == "east" else set(unique[midpoint:].tolist())
+        preferred_mask = np.array([label in preferred for label in labels])
+        keep_prob = np.where(preferred_mask, 1.0, 0.35)
+        keep_mask = self.rng.random(len(labels)) < keep_prob
+        if keep_mask.sum() < max(2, int(len(labels) * 0.25)):
+            return X_data, y_data
+        return X_data[keep_mask], y_data[keep_mask]
+
+    def _apply_quality_noise(self, X_data, metadata):
+        quality = metadata["data_quality"]
+        age = metadata["age_group"]
+        if quality == "clean" and age == "young":
+            return X_data
+        X_mod = np.copy(X_data)
+        noise_std = 0.08 if age == "middle" else 0.18
+        if quality == "noisy":
+            noise_std += 0.12
+        X_mod = X_mod + self.rng.normal(0, noise_std, size=X_mod.shape)
+        dropout_prob = 0.03 if quality == "biased" else 0.0
+        if age == "old":
+            dropout_prob += 0.07
+        if dropout_prob > 0:
+            mask = self.rng.random(X_mod.shape) < dropout_prob
+            X_mod[mask] = 0.0
+        return X_mod
+
+    def apply(self, client_datasets, metadata_rows):
+        pressured = []
+        updated_metadata = []
+        for X_data, y_data in client_datasets:
+            X_arr = np.asarray(X_data, dtype=float)
+            y_arr = np.asarray(y_data).astype(int)
+            metadata = metadata_rows[len(pressured)].copy()
+            X_arr, y_arr = self._filter_by_gender(X_arr, y_arr, metadata)
+            X_arr, y_arr = self._filter_by_region(X_arr, y_arr, metadata)
+            X_arr = self._apply_quality_noise(X_arr, metadata)
+            if len(y_arr) == 0:
+                X_arr = np.asarray(X_data[:1], dtype=float)
+                y_arr = np.asarray(y_data[:1]).astype(int)
+            metadata["sample_count"] = len(y_arr)
+            metadata["class_coverage"] = len(np.unique(y_arr)) if len(y_arr) else 0
+            updated_metadata.append(metadata)
+            pressured.append((X_arr, y_arr))
+        return pressured, updated_metadata
+
+
+class GroupFairnessEvaluator:
+    ATTRIBUTES = ("gender_group", "age_group", "region_group")
+
+    @staticmethod
+    def _client_index(client_id):
+        return int(str(client_id).split("_")[-1])
+
+    def __init__(self, metadata_rows):
+        self.metadata_by_client = {row["client_id"]: row for row in metadata_rows}
+
+    def group_rows(self, dataset_name, method_name, result):
+        rows = []
+        fairness_records = result.get("fairness_records", [])
+        regulatory_rows = result.get("regulatory_records", [])
+        for attr in self.ATTRIBUTES:
+            groups = sorted({row[attr] for row in self.metadata_by_client.values()})
+            for round_num in result.get("rounds", []):
+                group_metrics = []
+                for group in groups:
+                    clients = [cid for cid, meta in self.metadata_by_client.items() if meta[attr] == group]
+                    perf_rows = [
+                        row for row in fairness_records
+                        if row["round"] == round_num and row["client_id"] in clients
+                    ]
+                    acc_values = [row["local_accuracy"] for row in perf_rows if np.isfinite(_metric_value(row["local_accuracy"]))]
+                    f1_values = [row["local_f1_score"] for row in perf_rows if np.isfinite(_metric_value(row["local_f1_score"]))]
+                    bal_values = [row["local_balanced_accuracy"] for row in perf_rows if np.isfinite(_metric_value(row["local_balanced_accuracy"]))]
+                    auc_values = [row["local_auc_roc"] for row in perf_rows if np.isfinite(_metric_value(row.get("local_auc_roc")))]
+                    avg_acc = float(np.mean(acc_values)) if acc_values else np.nan
+                    avg_f1 = float(np.mean(f1_values)) if f1_values else np.nan
+                    avg_bal = float(np.mean(bal_values)) if bal_values else np.nan
+                    avg_auc = float(np.mean(auc_values)) if auc_values else np.nan
+                    group_metrics.append((group, avg_acc, avg_f1))
+                    rows.append(
+                        {
+                            "dataset": dataset_name,
+                            "method": method_name,
+                            "round": round_num,
+                            "attribute": attr,
+                            "group": group,
+                            "accuracy": avg_acc,
+                            "macro_f1": avg_f1,
+                            "balanced_accuracy": avg_bal,
+                            "auc": avg_auc,
+                            "equal_opportunity": np.nan,
+                        }
+                    )
+                acc_values = [item[1] for item in group_metrics if np.isfinite(_metric_value(item[1]))]
+                f1_values = [item[2] for item in group_metrics if np.isfinite(_metric_value(item[2]))]
+                if acc_values:
+                    gap = float(max(acc_values) - min(acc_values))
+                    worst = float(min(acc_values))
+                else:
+                    gap = 0.0
+                    worst = np.nan
+                f1_gap = float(max(f1_values) - min(f1_values)) if f1_values else 0.0
+                rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "method": method_name,
+                        "round": round_num,
+                        "attribute": attr,
+                        "group": "__summary__",
+                        "accuracy": np.nan,
+                        "macro_f1": np.nan,
+                        "balanced_accuracy": np.nan,
+                        "auc": np.nan,
+                        "equal_opportunity": np.nan,
+                        "worst_group_accuracy": worst,
+                        "group_accuracy_gap": gap,
+                        "group_f1_gap": f1_gap,
+                    }
+                )
+        return rows
+
+    def federated_rows(self, dataset_name, method_name, result):
+        rows = []
+        regulatory_rows = result.get("regulatory_records", [])
+        fairness_records = result.get("fairness_records", [])
+        for attr in self.ATTRIBUTES:
+            groups = sorted({row[attr] for row in self.metadata_by_client.values()})
+            for round_num in result.get("rounds", []):
+                for group in groups:
+                    clients = [cid for cid, meta in self.metadata_by_client.items() if meta[attr] == group]
+                    fair_rows = [
+                        row for row in fairness_records
+                        if row["round"] == round_num and row["client_id"] in clients
+                    ]
+                    reg_rows = [
+                        row for row in regulatory_rows
+                        if row["round"] == round_num and row["client_id"] in clients
+                    ]
+                    eps = [row["epsilon"] for row in fair_rows if row["epsilon"] is not None and np.isfinite(_metric_value(row["epsilon"]))]
+                    participation = [row["participation_count"] for row in fair_rows]
+                    adjusted_weights = [row["adjusted_weight"] for row in reg_rows if np.isfinite(_metric_value(row["adjusted_weight"]))]
+                    rows.append(
+                        {
+                            "dataset": dataset_name,
+                            "method": method_name,
+                            "round": round_num,
+                            "attribute": attr,
+                            "group": group,
+                            "avg_epsilon": float(np.mean(eps)) if eps else np.nan,
+                            "avg_aggregation_weight": float(np.mean(adjusted_weights)) if adjusted_weights else np.nan,
+                            "avg_participation_rounds": float(np.mean(participation)) if participation else 0.0,
+                            "warning_count": sum(1 for row in reg_rows if row["action"] == "warning"),
+                            "downweight_count": sum(1 for row in reg_rows if row["action"] == "downweight"),
+                            "quarantine_count": sum(1 for row in reg_rows if row["action"] == "quarantine"),
+                        }
+                    )
+        return rows
+
+
 def _assign_capabilities(num_clients):
     default_dist = [1.0, 0.85, 0.65, 0.40, 0.25][:num_clients]
     if len(default_dist) < num_clients:
@@ -255,7 +473,16 @@ def _split_train_val(client_datasets, classes, seed):
     for i, (X_c, y_c) in enumerate(client_datasets):
         if X_c.shape[0] > 5 and len(np.unique(y_c)) >= 2:
             counts = np.bincount(y_c.astype(int), minlength=len(classes))
-            stratify = y_c if np.min(counts[counts > 0]) >= 2 else None
+            present_classes = np.count_nonzero(counts)
+            val_size = int(np.ceil(X_c.shape[0] * 0.2))
+            train_size = X_c.shape[0] - val_size
+            stratify = (
+                y_c
+                if np.min(counts[counts > 0]) >= 2
+                and val_size >= present_classes
+                and train_size >= present_classes
+                else None
+            )
             X_train, X_val, y_train, y_val = train_test_split(
                 X_c, y_c, test_size=0.2, random_state=seed + i, stratify=stratify
             )
@@ -461,11 +688,22 @@ def _evaluate_params_on_client(params, client, classes, num_features):
     model.intercept_ = np.copy(params["intercept_"]).reshape(param_classes)
     try:
         predictions = model.predict(X_eval)
+        auc_roc = np.nan
+        if hasattr(model, "predict_proba") and len(np.unique(y_eval)) >= 2:
+            probas = model.predict_proba(X_eval)
+            try:
+                if len(class_values) <= 2:
+                    auc_roc = roc_auc_score(y_eval, probas[:, 1])
+                elif len(np.unique(y_eval)) == len(class_values):
+                    auc_roc = roc_auc_score(y_eval, probas, multi_class="ovr", average="macro", labels=class_values)
+            except ValueError:
+                auc_roc = np.nan
         average = "binary" if len(class_values) <= 2 else "macro"
         return {
             "local_accuracy": accuracy_score(y_eval, predictions),
             "local_balanced_accuracy": balanced_accuracy_score(y_eval, predictions),
             "local_f1_score": f1_score(y_eval, predictions, average=average, zero_division=0),
+            "local_auc_roc": auc_roc,
             "validation_size": len(y_eval),
         }
     except Exception:
@@ -497,6 +735,7 @@ def _client_fairness_records(round_num, clients, params, classes, num_features, 
             "local_accuracy": np.nan,
             "local_balanced_accuracy": np.nan,
             "local_f1_score": np.nan,
+            "local_auc_roc": np.nan,
         }
         if metrics is not None:
             record.update(metrics)
@@ -517,6 +756,211 @@ def _client_fairness_records(round_num, clients, params, classes, num_features, 
         "participation_std": participation_std,
     }
     return records, summary
+
+
+def _evaluate_params_global(params, X_eval, y_eval, classes, num_features):
+    if X_eval is None or y_eval is None or len(y_eval) == 0:
+        return {"accuracy": np.nan, "balanced_accuracy": np.nan, "f1_score": np.nan}
+    class_values = np.asarray(classes, dtype=int)
+    param_classes = 1 if len(class_values) <= 2 else len(class_values)
+    model = SGDClassifier(loss="log_loss")
+    model.coef_ = np.zeros((param_classes, num_features))
+    model.intercept_ = np.zeros(param_classes)
+    model.partial_fit(X_eval[:1], y_eval[:1], classes=class_values)
+    model.coef_ = np.copy(params["coef_"]).reshape(param_classes, num_features)
+    model.intercept_ = np.copy(params["intercept_"]).reshape(param_classes)
+    try:
+        predictions = model.predict(X_eval)
+        average = "binary" if len(class_values) <= 2 else "macro"
+        return {
+            "accuracy": accuracy_score(y_eval, predictions),
+            "balanced_accuracy": balanced_accuracy_score(y_eval, predictions),
+            "f1_score": f1_score(y_eval, predictions, average=average, zero_division=0),
+        }
+    except Exception:
+        return {"accuracy": np.nan, "balanced_accuracy": np.nan, "f1_score": np.nan}
+
+
+def _minmax_normalize(values):
+    finite = [float(value) for value in values if value is not None and np.isfinite(float(value))]
+    if not finite:
+        return {}
+    minimum = min(finite)
+    maximum = max(finite)
+    if abs(maximum - minimum) < 1e-12:
+        common = 0.5 if abs(maximum) > 1e-12 else 0.0
+        return {idx: common for idx, value in enumerate(values) if value is not None and np.isfinite(float(value))}
+    return {
+        idx: (float(value) - minimum) / (maximum - minimum)
+        for idx, value in enumerate(values)
+        if value is not None and np.isfinite(float(value))
+    }
+
+
+def _data_quality_component(client, classes, max_sample_count):
+    entropy_score = _compute_data_quality_score(client.y_train)
+    sample_score = len(client.y_train) / max(max_sample_count, 1)
+    coverage_score = len(np.unique(client.y_train)) / max(len(classes), 1)
+    return float(0.5 * entropy_score + 0.3 * sample_score + 0.2 * coverage_score)
+
+
+def _fairness_penalty_map(fairness_records):
+    finite_rows = [
+        row for row in fairness_records
+        if np.isfinite(_metric_value(row.get("local_accuracy")))
+    ]
+    if not finite_rows:
+        return {}
+    mean_accuracy = float(np.mean([_metric_value(row["local_accuracy"]) for row in finite_rows]))
+    denominator = max(abs(mean_accuracy), 1e-6)
+    return {
+        row["client_id"]: min(1.0, max(0.0, (mean_accuracy - _metric_value(row["local_accuracy"])) / denominator))
+        for row in finite_rows
+    }
+
+
+def _risk_penalty_from_record(record, quarantine_threshold):
+    if record is None:
+        return 0.0
+    action_penalty = {"normal": 0.0, "warning": 0.25, "downweight": 0.60, "quarantine": 1.0}
+    risk_score = _metric_value(record.get("risk_score"))
+    if not np.isfinite(risk_score):
+        risk_score = 0.0
+    risk_component = min(1.0, max(0.0, risk_score / max(quarantine_threshold, 1e-12)))
+    return float(max(risk_component, action_penalty.get(record.get("action"), 0.0)))
+
+
+class ContributionPenaltyEvaluator:
+    def __init__(self, args, classes, num_features, config, zkip):
+        self.args = args
+        self.classes = classes
+        self.num_features = num_features
+        self.config = config
+        self.zkip = zkip
+        self.quality_weight = max(0.0, float(args.contribution_quality_weight))
+        self.shapley_weight = max(0.0, float(args.contribution_shapley_weight))
+        self.risk_weight = max(0.0, float(args.contribution_risk_weight))
+        self.fairness_weight = max(0.0, float(args.contribution_fairness_weight))
+
+    def _utility(self, params, X_test, y_test):
+        metrics = _evaluate_params_global(params, X_test, y_test, self.classes, self.num_features)
+        return _metric_value(metrics.get(self.args.contribution_utility_metric))
+
+    def _aggregate_without_server_noise(self, base_params, updates):
+        params, success, _, _, _ = _aggregate_deltas(
+            base_params,
+            updates,
+            self.config["use_zkip"],
+            self.zkip,
+            privacy_config=None,
+            apply_server_dp=False,
+        )
+        return params if success else base_params
+
+    def evaluate_round(
+        self,
+        round_num,
+        clients,
+        selected_indices,
+        base_params,
+        client_updates,
+        adjusted_weights,
+        regulatory_records,
+        fairness_records,
+        round_update_norms,
+        X_test,
+        y_test,
+    ):
+        selected_indices = set(selected_indices)
+        max_sample_count = max((len(client.y_train) for client in clients), default=1)
+        update_by_client = {}
+        weighted_updates = []
+        for update in client_updates:
+            if len(update) == 5:
+                delta, proof, client_id, data_size, adjusted_weight = update
+            else:
+                delta, proof, client_id, data_size = update
+                adjusted_weight = adjusted_weights.get(client_id, data_size)
+            if delta is None or adjusted_weight <= 0:
+                continue
+            normalized = (delta, proof, client_id, data_size, adjusted_weight)
+            update_by_client[client_id] = normalized
+            weighted_updates.append(normalized)
+
+        full_params = self._aggregate_without_server_noise(base_params, weighted_updates)
+        full_utility = self._utility(full_params, X_test, y_test)
+        if not np.isfinite(full_utility):
+            full_utility = 0.0
+
+        shapley_values = [0.0 for _ in clients]
+        for idx, client in enumerate(clients):
+            if idx not in selected_indices or client.client_id not in update_by_client:
+                continue
+            without_client = [update for update in weighted_updates if update[2] != client.client_id]
+            without_params = self._aggregate_without_server_noise(base_params, without_client)
+            without_utility = self._utility(without_params, X_test, y_test)
+            without_utility = without_utility if np.isfinite(without_utility) else 0.0
+            shapley_values[idx] = float(full_utility - without_utility)
+
+        normalized_shapley = _minmax_normalize(shapley_values)
+        fairness_penalties = _fairness_penalty_map(fairness_records)
+        regulatory_by_client = {row["client_id"]: row for row in regulatory_records}
+        score_values = []
+        records = []
+        for idx, client in enumerate(clients):
+            selected = idx in selected_indices
+            quality_score = _data_quality_component(client, self.classes, max_sample_count)
+            approx_shapley = shapley_values[idx] if selected else 0.0
+            shapley_score = normalized_shapley.get(idx, 0.0) if selected else 0.0
+            regulatory_record = regulatory_by_client.get(client.client_id)
+            risk_penalty = _risk_penalty_from_record(regulatory_record, self.args.reg_quarantine_threshold) if selected else 0.0
+            fairness_penalty = fairness_penalties.get(client.client_id, 0.0) if selected else 0.0
+            adjusted_weight = 0.0
+            action = "not_selected"
+            if selected:
+                adjusted_weight = adjusted_weights.get(client.client_id, len(client.y_train))
+                action = regulatory_record.get("action", "normal") if regulatory_record is not None else "normal"
+            final_score = 0.0
+            if selected:
+                final_score = (
+                    self.quality_weight * quality_score
+                    + self.shapley_weight * shapley_score
+                    - self.risk_weight * risk_penalty
+                    - self.fairness_weight * fairness_penalty
+                )
+                score_values.append(final_score)
+            records.append(
+                {
+                    "round": round_num,
+                    "client_id": client.client_id,
+                    "selected": selected,
+                    "data_quality_score": quality_score,
+                    "approx_shapley": approx_shapley,
+                    "normalized_shapley": shapley_score,
+                    "risk_penalty": risk_penalty,
+                    "fairness_penalty": fairness_penalty,
+                    "final_contribution_score": final_score,
+                    "update_norm": round_update_norms[idx] if idx < len(round_update_norms) else None,
+                    "adjusted_weight": adjusted_weight,
+                    "regulatory_action": action,
+                    "utility_metric": self.args.contribution_utility_metric,
+                    "full_utility": full_utility,
+                }
+            )
+
+        score_gap, score_std, _ = _spread(score_values)
+        shapley_gap, shapley_std, _ = _spread([record["approx_shapley"] for record in records if record["selected"]])
+        summary = {
+            "avg_contribution_score": float(np.mean(score_values)) if score_values else 0.0,
+            "contribution_score_gap": score_gap,
+            "contribution_score_std": score_std,
+            "avg_approx_shapley": float(np.mean([record["approx_shapley"] for record in records if record["selected"]])) if score_values else 0.0,
+            "approx_shapley_gap": shapley_gap,
+            "approx_shapley_std": shapley_std,
+            "avg_risk_penalty": float(np.mean([record["risk_penalty"] for record in records if record["selected"]])) if score_values else 0.0,
+            "avg_fairness_penalty": float(np.mean([record["fairness_penalty"] for record in records if record["selected"]])) if score_values else 0.0,
+        }
+        return records, summary
 
 
 def _parse_csv_list(value, allowed, name):
@@ -737,6 +1181,7 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
             "local_accuracy",
             "local_balanced_accuracy",
             "local_f1_score",
+            "local_auc_roc",
         ]
         with open(os.path.join(output_dir, "client_fairness_summary.csv"), "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -779,6 +1224,60 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
         charts.save_figure(os.path.join(output_dir, "participation_fairness.png"))
         plt.close()
 
+    if result.get("contribution_enabled"):
+        contribution_rows = result.get("contribution_records", [])
+        _write_csv(os.path.join(output_dir, "contribution_penalty_summary.csv"), contribution_rows)
+
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
+        for client_id in client_ids:
+            rows = [row for row in contribution_rows if row["client_id"] == client_id]
+            if rows:
+                plt.plot(
+                    [row["round"] for row in rows],
+                    [row["final_contribution_score"] for row in rows],
+                    marker="o",
+                    label=client_id,
+                )
+        plt.xlabel("Round")
+        plt.ylabel("Contribution Score")
+        plt.title("Contribution Score by Client")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "contribution_score_by_client.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
+        for client_id in client_ids:
+            rows = [row for row in contribution_rows if row["client_id"] == client_id and row["selected"]]
+            if rows:
+                plt.plot(
+                    [row["round"] for row in rows],
+                    [row["approx_shapley"] for row in rows],
+                    marker="o",
+                    label=client_id,
+                )
+        plt.xlabel("Round")
+        plt.ylabel("Approximate Shapley")
+        plt.title("Leave-One-Out Approximate Shapley by Client")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "approx_shapley_by_client.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.plot(result["rounds"], result.get("avg_risk_penalties", []), marker="o", label="risk penalty")
+        plt.plot(result["rounds"], result.get("avg_fairness_penalties", []), marker="o", label="fairness penalty")
+        plt.xlabel("Round")
+        plt.ylabel("Average Penalty")
+        plt.title("Penalty Components")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "penalty_components.png"))
+        plt.close()
+
 
 def _pollution_detection_metrics(result):
     polluted_pairs = {(row["round"], row["client_id"]) for row in result.get("pollution_records", [])}
@@ -816,12 +1315,14 @@ def _run_single_method(
     participation_policy="all",
     participation_rate=1.0,
     label_suffix="",
+    synthetic_metadata=None,
+    capability_overrides=None,
 ):
     config = METHOD_CONFIGS[method_name]
     num_features = X_test.shape[1]
     clients = _init_clients(train_val_data, num_features, classes, args.seed, privacy_config)
     client_ids = [client.client_id for client in clients]
-    capabilities = _assign_capabilities(len(clients))
+    capabilities = capability_overrides if capability_overrides is not None else _assign_capabilities(len(clients))
     for i, client in enumerate(clients):
         client.compute_capability = capabilities.get(i, 1.0)
 
@@ -839,9 +1340,14 @@ def _run_single_method(
         "method": method_name,
         "label": f"{config['label']}{label_suffix}",
         "participation_policy": participation_policy,
-        "regulatory_enabled": args.enable_regulatory_intervention and args.experiment_suite in {"baselines", "pollution"},
+        "regulatory_enabled": (
+            args.experiment_suite == "contribution"
+            or (args.enable_regulatory_intervention and args.experiment_suite in {"baselines", "pollution", "synthetic_fairness", "contribution"})
+        ),
         "pollution_enabled": args.experiment_suite == "pollution" and args.enable_pollution_injection,
-        "fairness_enabled": args.experiment_suite == "fairness" or args.enable_fairness_evaluation,
+        "fairness_enabled": args.experiment_suite in {"fairness", "synthetic_fairness", "contribution"} or args.enable_fairness_evaluation,
+        "contribution_enabled": args.experiment_suite == "contribution" or args.enable_contribution_evaluation,
+        "synthetic_sensitive_metadata": synthetic_metadata or [],
         "rounds": [],
         "accuracies": [],
         "balanced_accuracies": [],
@@ -875,6 +1381,21 @@ def _run_single_method(
         "epsilon_stds": [],
         "participation_gaps": [],
         "participation_stds": [],
+        "contribution_records": [],
+        "avg_contribution_scores": [],
+        "contribution_score_gaps": [],
+        "contribution_score_stds": [],
+        "avg_approx_shapley": [],
+        "approx_shapley_gaps": [],
+        "approx_shapley_stds": [],
+        "avg_risk_penalties": [],
+        "avg_fairness_penalties": [],
+        "final_group_accuracy_gap": 0.0,
+        "final_worst_group_accuracy": np.nan,
+        "final_group_f1_gap": 0.0,
+        "final_group_epsilon_gap": 0.0,
+        "final_group_participation_gap": 0.0,
+        "final_group_quarantine_gap": 0.0,
     }
 
     print(f"\n=== Running {config['label']} ({method_name}) ===")
@@ -887,6 +1408,9 @@ def _run_single_method(
             quarantine_threshold=args.reg_quarantine_threshold,
             penalty_weight=args.reg_penalty_weight,
         )
+    contribution_evaluator = None
+    if result["contribution_enabled"]:
+        contribution_evaluator = ContributionPenaltyEvaluator(args, classes, num_features, config, server.zkip)
     polluted_indices = _parse_client_indices(args.polluted_clients, len(clients)) if result["pollution_enabled"] else []
     pollution_rng = np.random.default_rng(args.seed + 9000)
     participation_counts = [0 for _ in clients]
@@ -1003,6 +1527,8 @@ def _run_single_method(
                 for delta, proof, client_id, data_size in client_updates
                 if adjusted_weights.get(client_id, data_size) > 0
             ]
+        else:
+            adjusted_weights = {client_id: data_size for _, _, client_id, data_size in client_updates}
 
         server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_deltas(
             server.global_model_parameters,
@@ -1055,6 +1581,7 @@ def _run_single_method(
         result["per_client_ebcd_stats"].append(round_ebcd_stats)
         result["per_client_zkip_status"].append(round_zkip_status)
         result["per_client_epsilon"].append(round_epsilons)
+        fairness_records = []
         if result["fairness_enabled"]:
             fairness_records, fairness_summary = _client_fairness_records(
                 round_num,
@@ -1094,6 +1621,38 @@ def _run_single_method(
             result["regulatory_downweight_counts"].append(0)
             result["regulatory_quarantine_counts"].append(0)
             result["regulatory_avg_risks"].append(0.0)
+        if contribution_evaluator is not None:
+            contribution_records, contribution_summary = contribution_evaluator.evaluate_round(
+                round_num,
+                clients,
+                selected_indices,
+                global_params,
+                client_updates,
+                adjusted_weights,
+                regulatory_records,
+                fairness_records,
+                round_update_norms,
+                X_test,
+                y_test,
+            )
+            result["contribution_records"].extend(contribution_records)
+            result["avg_contribution_scores"].append(contribution_summary["avg_contribution_score"])
+            result["contribution_score_gaps"].append(contribution_summary["contribution_score_gap"])
+            result["contribution_score_stds"].append(contribution_summary["contribution_score_std"])
+            result["avg_approx_shapley"].append(contribution_summary["avg_approx_shapley"])
+            result["approx_shapley_gaps"].append(contribution_summary["approx_shapley_gap"])
+            result["approx_shapley_stds"].append(contribution_summary["approx_shapley_std"])
+            result["avg_risk_penalties"].append(contribution_summary["avg_risk_penalty"])
+            result["avg_fairness_penalties"].append(contribution_summary["avg_fairness_penalty"])
+        else:
+            result["avg_contribution_scores"].append(0.0)
+            result["contribution_score_gaps"].append(0.0)
+            result["contribution_score_stds"].append(0.0)
+            result["avg_approx_shapley"].append(0.0)
+            result["approx_shapley_gaps"].append(0.0)
+            result["approx_shapley_stds"].append(0.0)
+            result["avg_risk_penalties"].append(0.0)
+            result["avg_fairness_penalties"].append(0.0)
 
         contribution_history.append(
             {
@@ -1164,6 +1723,18 @@ def _final_metric_row(method_name, result):
         "avg_epsilon_gap": np.nanmean(result.get("epsilon_gaps", [])) if result.get("epsilon_gaps") else 0.0,
         "final_participation_gap": result["participation_gaps"][-1] if result.get("participation_gaps") else 0.0,
         "avg_participation_gap": np.nanmean(result.get("participation_gaps", [])) if result.get("participation_gaps") else 0.0,
+        "final_group_accuracy_gap": result.get("final_group_accuracy_gap", 0.0),
+        "final_worst_group_accuracy": result.get("final_worst_group_accuracy", np.nan),
+        "final_group_f1_gap": result.get("final_group_f1_gap", 0.0),
+        "final_group_epsilon_gap": result.get("final_group_epsilon_gap", 0.0),
+        "final_group_participation_gap": result.get("final_group_participation_gap", 0.0),
+        "final_group_quarantine_gap": result.get("final_group_quarantine_gap", 0.0),
+        "avg_contribution_score": np.nanmean(result.get("avg_contribution_scores", [])) if result.get("avg_contribution_scores") else 0.0,
+        "final_contribution_score_gap": result["contribution_score_gaps"][-1] if result.get("contribution_score_gaps") else 0.0,
+        "avg_approx_shapley": np.nanmean(result.get("avg_approx_shapley", [])) if result.get("avg_approx_shapley") else 0.0,
+        "final_approx_shapley_gap": result["approx_shapley_gaps"][-1] if result.get("approx_shapley_gaps") else 0.0,
+        "avg_risk_penalty": np.nanmean(result.get("avg_risk_penalties", [])) if result.get("avg_risk_penalties") else 0.0,
+        "avg_fairness_penalty": np.nanmean(result.get("avg_fairness_penalties", [])) if result.get("avg_fairness_penalties") else 0.0,
     }
     row.update(_pollution_detection_metrics(result))
     return row
@@ -1291,6 +1862,54 @@ def _save_suite_summary(output_dir, method_results):
         charts.save_figure(os.path.join(output_dir, "participation_fairness.png"))
         plt.close()
 
+    contribution_rows = []
+    for method_name, result in method_results.items():
+        for row in result.get("contribution_records", []):
+            contribution_rows.append({"method": method_name, **row})
+    if contribution_rows:
+        _write_csv(os.path.join(output_dir, "contribution_penalty_summary.csv"), contribution_rows)
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for method_name, result in method_results.items():
+            if result.get("avg_contribution_scores"):
+                plt.plot(result["rounds"], result["avg_contribution_scores"], marker="o", label=method_name)
+        plt.xlabel("Round")
+        plt.ylabel("Average Contribution Score")
+        plt.title("Average Contribution Score")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "contribution_score_by_client.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for method_name, result in method_results.items():
+            if result.get("avg_approx_shapley"):
+                plt.plot(result["rounds"], result["avg_approx_shapley"], marker="o", label=method_name)
+        plt.xlabel("Round")
+        plt.ylabel("Average Approximate Shapley")
+        plt.title("Average Leave-One-Out Approximate Shapley")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "approx_shapley_by_client.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for method_name, result in method_results.items():
+            if result.get("avg_risk_penalties"):
+                plt.plot(result["rounds"], result["avg_risk_penalties"], marker="o", label=f"{method_name} risk")
+            if result.get("avg_fairness_penalties"):
+                plt.plot(result["rounds"], result["avg_fairness_penalties"], marker="x", label=f"{method_name} fairness")
+        plt.xlabel("Round")
+        plt.ylabel("Average Penalty")
+        plt.title("Penalty Components")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "penalty_components.png"))
+        plt.close()
+
     plt.figure(figsize=charts.FIGSIZE_COMPARISON)
     for metric_idx, (metric_key, title) in enumerate(
         (("accuracies", "Accuracy"), ("f1_scores", "Macro-F1"), ("balanced_accuracies", "Balanced Accuracy")),
@@ -1340,8 +1959,73 @@ def _load_suite_data(args, privacy_config):
     return train_val_data, X_test, y_test, classes, failure_plan
 
 
+def _synthetic_capabilities(metadata_rows):
+    value_by_level = {"high": 1.0, "medium": 0.65, "low": 0.30}
+    return {row["client_idx"]: value_by_level.get(row["compute_level"], 0.65) for row in metadata_rows}
+
+
+def _synthetic_failure_plan(args, metadata_rows, privacy_config):
+    rng = np.random.default_rng(args.seed + 3030)
+    region_prob = {"east": 0.05, "central": 0.15, "west": 0.35}
+    quality_bonus = {"clean": 0.0, "biased": 0.03, "noisy": 0.08}
+    plan = np.zeros((args.num_rounds, args.num_clients), dtype=bool)
+    for row in metadata_rows:
+        idx = row["client_idx"]
+        prob = region_prob.get(row["region_group"], privacy_config.failure_prob)
+        prob += quality_bonus.get(row["data_quality"], 0.0)
+        prob = min(0.85, max(0.0, prob))
+        plan[:, idx] = rng.random(args.num_rounds) < prob
+    return plan
+
+
+def _load_synthetic_fairness_data(args, privacy_config, dataset_name):
+    data_args = copy.copy(args)
+    data_args.dataset = dataset_name
+    X_train_full, y_train_full, X_test, y_test, _, classes, presplit_client_data = load_experiment_data(
+        dataset_name=dataset_name,
+        data_root=args.data_root,
+        random_state=args.seed,
+        max_samples=args.max_samples,
+        emnist_split=args.emnist_split,
+    )
+    if X_train_full is None:
+        raise RuntimeError(f"Failed to load data for {dataset_name}.")
+    if presplit_client_data is not None:
+        client_datasets = presplit_client_data
+        data_args.num_clients = len(client_datasets)
+    else:
+        client_datasets = split_data_for_clients(
+            X_train_full,
+            y_train_full,
+            args.num_clients,
+            size_ratios=None,
+            partition=args.partition,
+            dirichlet_alpha=args.dirichlet_alpha,
+            random_state=args.seed,
+        )
+
+    assigner = SyntheticSensitiveAttributeAssigner(args.synthetic_sensitive_attrs, args.fairness_pressure_profile)
+    metadata_rows = assigner.assign(client_datasets)
+    applier = SyntheticFairnessPressureApplier(seed=args.seed + 4040)
+    pressured_datasets, metadata_rows = applier.apply(client_datasets, metadata_rows)
+    data_args.num_clients = len(pressured_datasets)
+    train_val_data = _split_train_val(pressured_datasets, classes, args.seed)
+    capabilities = _synthetic_capabilities(metadata_rows)
+    failure_plan = _synthetic_failure_plan(data_args, metadata_rows, privacy_config)
+    for row in metadata_rows:
+        row["dataset"] = dataset_name
+    return data_args, train_val_data, X_test, y_test, classes, failure_plan, metadata_rows, capabilities
+
+
 def _write_csv(path, rows):
-    fieldnames = list(rows[0].keys()) if rows else ["name"]
+    if rows:
+        fieldnames = []
+        for row in rows:
+            for key in row.keys():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+    else:
+        fieldnames = ["name"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -1364,6 +2048,83 @@ def _plot_group_metric(summary_rows, group_key, metric_key, output_path, ylabel,
     plt.tight_layout()
     charts.save_figure(output_path)
     plt.close()
+
+
+def _summary_rows(rows):
+    return [row for row in rows if row.get("group") == "__summary__"]
+
+
+def _last_round(rows):
+    if not rows:
+        return []
+    last = max(row["round"] for row in rows)
+    return [row for row in rows if row["round"] == last]
+
+
+def _max_metric(rows, metric_key, default=0.0):
+    values = [_metric_value(row.get(metric_key)) for row in rows]
+    values = [value for value in values if np.isfinite(value)]
+    return float(max(values)) if values else default
+
+
+def _min_metric(rows, metric_key, default=np.nan):
+    values = [_metric_value(row.get(metric_key)) for row in rows]
+    values = [value for value in values if np.isfinite(value)]
+    return float(min(values)) if values else default
+
+
+def _group_gap(rows, metric_key):
+    gaps = []
+    for attr in sorted({row.get("attribute") for row in rows}):
+        attr_rows = [row for row in rows if row.get("attribute") == attr]
+        values = [_metric_value(row.get(metric_key)) for row in attr_rows]
+        values = [value for value in values if np.isfinite(value)]
+        if values:
+            gaps.append(max(values) - min(values))
+    return float(max(gaps)) if gaps else 0.0
+
+
+def _apply_synthetic_final_metrics(result, group_rows, federated_rows):
+    final_summary = _last_round(_summary_rows(group_rows))
+    final_federated = _last_round(federated_rows)
+    result["final_group_accuracy_gap"] = _max_metric(final_summary, "group_accuracy_gap")
+    result["final_worst_group_accuracy"] = _min_metric(final_summary, "worst_group_accuracy")
+    result["final_group_f1_gap"] = _max_metric(final_summary, "group_f1_gap")
+    result["final_group_epsilon_gap"] = _group_gap(final_federated, "avg_epsilon")
+    result["final_group_participation_gap"] = _group_gap(final_federated, "avg_participation_rounds")
+    result["final_group_quarantine_gap"] = _group_gap(final_federated, "quarantine_count")
+
+
+def _plot_synthetic_summary(group_rows, federated_rows, output_dir):
+    summary = _summary_rows(group_rows)
+    plot_specs = [
+        (summary, "group_accuracy_gap", "group_accuracy_gap.png", "Accuracy Gap", "Group Accuracy Gap"),
+        (summary, "worst_group_accuracy", "worst_group_accuracy.png", "Worst-group Accuracy", "Worst-group Accuracy"),
+        (summary, "group_f1_gap", "group_macro_f1_gap.png", "Macro-F1 Gap", "Group Macro-F1 Gap"),
+        (federated_rows, "avg_epsilon", "group_privacy_budget_gap.png", "Average Epsilon", "Group Privacy Budget"),
+        (federated_rows, "avg_participation_rounds", "group_participation_gap.png", "Avg Participation Rounds", "Group Participation"),
+        (federated_rows, "quarantine_count", "group_regulatory_actions.png", "Quarantine Count", "Group Regulatory Actions"),
+    ]
+    for rows, metric_key, filename, ylabel, title in plot_specs:
+        if not rows:
+            continue
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        groups = {}
+        for row in rows:
+            key = f"{row.get('method')}:{row.get('attribute')}:{row.get('group')}"
+            groups.setdefault(key, []).append(row)
+        for key, key_rows in groups.items():
+            key_rows = sorted(key_rows, key=lambda row: row["round"])
+            values = [_metric_value(row.get(metric_key)) for row in key_rows]
+            plt.plot([row["round"] for row in key_rows], values, marker="o", label=key)
+        plt.xlabel("Round")
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.grid(True, alpha=0.3)
+        plt.legend(fontsize=7)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, filename))
+        plt.close()
 
 
 def _plot_final_metric(final_rows, x_key, metric_key, output_path, xlabel, ylabel, title):
@@ -1552,6 +2313,117 @@ def run_fairness_suite(args, output_dir):
         )
     _save_suite_summary(output_dir, method_results)
     print(f"Client fairness suite artifacts saved to: {output_dir}")
+
+
+def run_contribution_suite(args, output_dir):
+    methods = _parse_csv_list(args.contribution_methods, CONTRIBUTION_METHODS, "contribution methods")
+    privacy_config = make_privacy_config(args)
+    print(f"Running penalty and Shapley contribution suite: methods={methods}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+
+    train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    method_results = {}
+    for method_name in methods:
+        method_args = copy.copy(args)
+        method_args.enable_contribution_evaluation = True
+        method_args.enable_fairness_evaluation = True
+        method_args.enable_regulatory_intervention = True
+        method_output_dir = os.path.join(output_dir, method_name)
+        method_results[method_name] = _run_single_method(
+            method_name,
+            method_args,
+            train_val_data,
+            X_test,
+            y_test,
+            classes,
+            failure_plan,
+            method_output_dir,
+            privacy_config,
+            label_suffix=" (contribution)",
+        )
+    _save_suite_summary(output_dir, method_results)
+    print(f"Penalty and Shapley contribution suite artifacts saved to: {output_dir}")
+
+
+def run_synthetic_fairness_suite(args, output_dir):
+    datasets = _parse_csv_list(args.fairness_datasets, SYNTHETIC_FAIRNESS_DATASETS, "synthetic fairness datasets")
+    methods = _parse_csv_list(args.fairness_methods, FAIRNESS_METHODS, "synthetic fairness methods")
+    privacy_config = make_privacy_config(args)
+    print(f"Running synthetic sensitive-attribute fairness suite: datasets={datasets}, methods={methods}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+
+    method_results = {}
+    metadata_rows_all = []
+    group_rows_all = []
+    federated_rows_all = []
+
+    for dataset_name in datasets:
+        data_args = copy.copy(args)
+        data_args.dataset = dataset_name
+        try:
+            data_args, train_val_data, X_test, y_test, classes, failure_plan, metadata_rows, capabilities = (
+                _load_synthetic_fairness_data(data_args, privacy_config, dataset_name)
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Synthetic fairness dataset '{dataset_name}' is not ready. "
+                f"For FEMNIST/CIFAR10/CIFAR100, generate data/{dataset_name}/all_data first with the dataset generate_data.py script. "
+                f"Original error: {exc}"
+            ) from exc
+
+        metadata_rows_all.extend(metadata_rows)
+        evaluator = GroupFairnessEvaluator(metadata_rows)
+        for method_name in methods:
+            method_args = copy.copy(data_args)
+            method_args.enable_fairness_evaluation = True
+            method_args.enable_regulatory_intervention = True
+            method_output_dir = os.path.join(output_dir, dataset_name, method_name)
+            result = _run_single_method(
+                method_name,
+                method_args,
+                train_val_data,
+                X_test,
+                y_test,
+                classes,
+                failure_plan,
+                method_output_dir,
+                privacy_config,
+                label_suffix=f" ({dataset_name} synthetic fairness)",
+                synthetic_metadata=metadata_rows,
+                capability_overrides=capabilities,
+            )
+            result_key = f"{dataset_name}_{method_name}"
+            group_rows = evaluator.group_rows(dataset_name, method_name, result)
+            federated_rows = evaluator.federated_rows(dataset_name, method_name, result)
+            _apply_synthetic_final_metrics(result, group_rows, federated_rows)
+            method_results[result_key] = result
+            group_rows_all.extend(group_rows)
+            federated_rows_all.extend(federated_rows)
+
+    _write_csv(
+        os.path.join(output_dir, "synthetic_sensitive_clients.csv"),
+        [
+            {
+                "dataset": row["dataset"],
+                "client_id": row["client_id"],
+                "gender_group": row["gender_group"],
+                "age_group": row["age_group"],
+                "region_group": row["region_group"],
+                "compute_level": row["compute_level"],
+                "data_quality": row["data_quality"],
+                "sample_count": row["sample_count"],
+                "class_coverage": row["class_coverage"],
+            }
+            for row in metadata_rows_all
+        ],
+    )
+    _write_csv(os.path.join(output_dir, "synthetic_group_fairness_summary.csv"), group_rows_all)
+    _write_csv(os.path.join(output_dir, "federated_group_fairness_summary.csv"), federated_rows_all)
+    _plot_synthetic_summary(group_rows_all, federated_rows_all, output_dir)
+    _save_suite_summary(output_dir, method_results)
+    print(f"Synthetic sensitive-attribute fairness suite artifacts saved to: {output_dir}")
 
 
 def run_participation_suite(args, output_dir):

@@ -52,8 +52,8 @@ def parse_args():
     parser.add_argument("--run-name", default=None,
                         help="本次实验目录名。默认自动使用 数据集_YYYYmmdd_HHMMSS。")
     parser.add_argument("--experiment-suite", default="single",
-                        choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution", "fairness"],
-                        help="single runs APDP-RTFL; baselines, participation, privacy_sensitivity, pollution, and fairness run comparison suites.")
+                        choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution"],
+                        help="single runs APDP-RTFL; comparison suites include baselines, participation, privacy_sensitivity, pollution, fairness, synthetic_fairness, and contribution.")
     parser.add_argument("--methods", default="all",
                         help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,global_dp,dp_rtfl,apdp_rtfl.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
@@ -98,6 +98,27 @@ def parse_args():
                         help="Enable client-level fairness evaluation in sklearn experiment suites.")
     parser.add_argument("--fairness-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
                         help="Methods for client-level fairness experiments.")
+    parser.add_argument("--synthetic-sensitive-attrs", default="gender,age,region",
+                        help="Synthetic client-level sensitive attributes for fairness pressure tests.")
+    parser.add_argument("--fairness-pressure-profile", default="regulated", choices=["regulated"],
+                        help="Synthetic fairness pressure profile.")
+    parser.add_argument("--fairness-datasets", default="emnist",
+                        help="Datasets intended for synthetic fairness pressure tests.")
+    parser.add_argument("--enable-contribution-evaluation", action="store_true",
+                        help="Enable penalty and approximate Shapley contribution evaluation in sklearn experiment suites.")
+    parser.add_argument("--contribution-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
+                        help="Methods for penalty and Shapley contribution experiments.")
+    parser.add_argument("--contribution-quality-weight", type=float, default=0.25,
+                        help="Weight for data-quality score in the final contribution score.")
+    parser.add_argument("--contribution-shapley-weight", type=float, default=0.35,
+                        help="Weight for approximate Shapley score in the final contribution score.")
+    parser.add_argument("--contribution-risk-weight", type=float, default=0.30,
+                        help="Weight for regulatory risk penalty in the final contribution score.")
+    parser.add_argument("--contribution-fairness-weight", type=float, default=0.10,
+                        help="Weight for client fairness penalty in the final contribution score.")
+    parser.add_argument("--contribution-utility-metric", default="balanced_accuracy",
+                        choices=["accuracy", "balanced_accuracy", "f1_score"],
+                        help="Utility metric used for leave-one-out approximate Shapley evaluation.")
     parser.add_argument("--enable-regulatory-intervention", action="store_true",
                         help="Enable regulatory warning, downweighting, and quarantine in sklearn baseline suites.")
     parser.add_argument("--reg-warning-threshold", type=float, default=1.5,
@@ -336,14 +357,14 @@ def main():
     DP_EPSILON = args.dp_epsilon
     DP_DELTA = args.dp_delta
     DP_L2_NORM_CLIP = args.dp_l2_norm_clip
-    if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution", "fairness"}:
+    if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution"}:
         if args.backend == "torch":
             from torch_baselines import run_torch_baseline_suite
             if args.experiment_suite != "baselines":
-                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity/pollution/fairness suites.")
+                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity/pollution/fairness/synthetic_fairness/contribution suites.")
             run_torch_baseline_suite(args, output_dir)
         else:
-            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite, run_fairness_suite
+            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite, run_fairness_suite, run_synthetic_fairness_suite, run_contribution_suite
             if args.experiment_suite == "baselines":
                 run_baseline_suite(args, output_dir)
             elif args.experiment_suite == "participation":
@@ -352,8 +373,12 @@ def main():
                 run_privacy_sensitivity_suite(args, output_dir)
             elif args.experiment_suite == "pollution":
                 run_pollution_injection_suite(args, output_dir)
-            else:
+            elif args.experiment_suite == "fairness":
                 run_fairness_suite(args, output_dir)
+            elif args.experiment_suite == "synthetic_fairness":
+                run_synthetic_fairness_suite(args, output_dir)
+            else:
+                run_contribution_suite(args, output_dir)
         return
     if args.backend == "torch":
         from torch_baselines import run_torch_baseline_suite
