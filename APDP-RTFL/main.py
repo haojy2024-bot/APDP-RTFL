@@ -52,8 +52,8 @@ def parse_args():
     parser.add_argument("--run-name", default=None,
                         help="本次实验目录名。默认自动使用 数据集_YYYYmmdd_HHMMSS。")
     parser.add_argument("--experiment-suite", default="single",
-                        choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution"],
-                        help="single runs APDP-RTFL; baselines, participation, privacy_sensitivity, and pollution run comparison suites.")
+                        choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution", "fairness"],
+                        help="single runs APDP-RTFL; baselines, participation, privacy_sensitivity, pollution, and fairness run comparison suites.")
     parser.add_argument("--methods", default="all",
                         help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,global_dp,dp_rtfl,apdp_rtfl.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
@@ -94,6 +94,10 @@ def parse_args():
                         help="Comma-separated total privacy budgets for privacy sensitivity experiments.")
     parser.add_argument("--privacy-sensitivity-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
                         help="Methods for privacy sensitivity experiments.")
+    parser.add_argument("--enable-fairness-evaluation", action="store_true",
+                        help="Enable client-level fairness evaluation in sklearn experiment suites.")
+    parser.add_argument("--fairness-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
+                        help="Methods for client-level fairness experiments.")
     parser.add_argument("--enable-regulatory-intervention", action="store_true",
                         help="Enable regulatory warning, downweighting, and quarantine in sklearn baseline suites.")
     parser.add_argument("--reg-warning-threshold", type=float, default=1.5,
@@ -332,22 +336,24 @@ def main():
     DP_EPSILON = args.dp_epsilon
     DP_DELTA = args.dp_delta
     DP_L2_NORM_CLIP = args.dp_l2_norm_clip
-    if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution"}:
+    if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution", "fairness"}:
         if args.backend == "torch":
             from torch_baselines import run_torch_baseline_suite
             if args.experiment_suite != "baselines":
-                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity/pollution suites.")
+                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity/pollution/fairness suites.")
             run_torch_baseline_suite(args, output_dir)
         else:
-            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite
+            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite, run_fairness_suite
             if args.experiment_suite == "baselines":
                 run_baseline_suite(args, output_dir)
             elif args.experiment_suite == "participation":
                 run_participation_suite(args, output_dir)
             elif args.experiment_suite == "privacy_sensitivity":
                 run_privacy_sensitivity_suite(args, output_dir)
-            else:
+            elif args.experiment_suite == "pollution":
                 run_pollution_injection_suite(args, output_dir)
+            else:
+                run_fairness_suite(args, output_dir)
         return
     if args.backend == "torch":
         from torch_baselines import run_torch_baseline_suite

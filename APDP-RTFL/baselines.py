@@ -7,6 +7,8 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import kurtosis, skew, entropy
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 
 from data_utils import load_experiment_data, split_data_for_clients
@@ -27,6 +29,7 @@ BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl", "global_dp", "dp_rtfl", "apdp
 PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
 PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 POLLUTION_METHODS = ("apdp_rtfl",)
+FAIRNESS_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 
 
 class PrivacyRuntimeConfig:
@@ -443,6 +446,79 @@ def _make_eval_server(method_name, client_ids, num_features, classes, params):
     return server
 
 
+def _evaluate_params_on_client(params, client, classes, num_features):
+    X_eval = client.X_val if client.X_val is not None and client.X_val.shape[0] > 0 else None
+    y_eval = client.y_val if client.y_val is not None and len(client.y_val) > 0 else None
+    if X_eval is None or y_eval is None or len(np.unique(y_eval)) < 2:
+        return None
+    class_values = np.asarray(classes, dtype=int)
+    param_classes = 1 if len(class_values) <= 2 else len(class_values)
+    model = SGDClassifier(loss="log_loss")
+    model.coef_ = np.zeros((param_classes, num_features))
+    model.intercept_ = np.zeros(param_classes)
+    model.partial_fit(X_eval[:1], y_eval[:1], classes=class_values)
+    model.coef_ = np.copy(params["coef_"]).reshape(param_classes, num_features)
+    model.intercept_ = np.copy(params["intercept_"]).reshape(param_classes)
+    try:
+        predictions = model.predict(X_eval)
+        average = "binary" if len(class_values) <= 2 else "macro"
+        return {
+            "local_accuracy": accuracy_score(y_eval, predictions),
+            "local_balanced_accuracy": balanced_accuracy_score(y_eval, predictions),
+            "local_f1_score": f1_score(y_eval, predictions, average=average, zero_division=0),
+            "validation_size": len(y_eval),
+        }
+    except Exception:
+        return None
+
+
+def _spread(values):
+    values = [float(value) for value in values if value is not None and np.isfinite(float(value))]
+    if not values:
+        return 0.0, 0.0, np.nan
+    return float(max(values) - min(values)), float(np.std(values)), float(min(values))
+
+
+def _client_fairness_records(round_num, clients, params, classes, num_features, epsilons, selected_indices, participation_counts):
+    records = []
+    local_accuracies = []
+    eps_values = []
+    for idx, client in enumerate(clients):
+        metrics = _evaluate_params_on_client(params, client, classes, num_features)
+        epsilon = epsilons[idx] if idx < len(epsilons) else None
+        selected = idx in selected_indices
+        record = {
+            "round": round_num,
+            "client_id": client.client_id,
+            "selected": selected,
+            "participation_count": participation_counts[idx],
+            "epsilon": epsilon,
+            "validation_size": 0,
+            "local_accuracy": np.nan,
+            "local_balanced_accuracy": np.nan,
+            "local_f1_score": np.nan,
+        }
+        if metrics is not None:
+            record.update(metrics)
+            local_accuracies.append(metrics["local_accuracy"])
+        if epsilon is not None and np.isfinite(float(epsilon)):
+            eps_values.append(float(epsilon))
+        records.append(record)
+    acc_gap, acc_std, acc_min = _spread(local_accuracies)
+    epsilon_gap, epsilon_std, _ = _spread(eps_values)
+    participation_gap, participation_std, _ = _spread(participation_counts)
+    summary = {
+        "client_accuracy_gap": acc_gap,
+        "client_accuracy_std": acc_std,
+        "client_min_accuracy": acc_min,
+        "epsilon_gap": epsilon_gap,
+        "epsilon_std": epsilon_std,
+        "participation_gap": participation_gap,
+        "participation_std": participation_std,
+    }
+    return records, summary
+
+
 def _parse_csv_list(value, allowed, name):
     items = [item.strip().lower() for item in value.split(",") if item.strip()]
     invalid = [item for item in items if item not in allowed]
@@ -649,6 +725,60 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
             writer.writeheader()
             writer.writerows(pollution_rows)
 
+    if result.get("fairness_enabled"):
+        fairness_rows = result.get("fairness_records", [])
+        fieldnames = [
+            "round",
+            "client_id",
+            "selected",
+            "participation_count",
+            "epsilon",
+            "validation_size",
+            "local_accuracy",
+            "local_balanced_accuracy",
+            "local_f1_score",
+        ]
+        with open(os.path.join(output_dir, "client_fairness_summary.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(fairness_rows)
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.plot(result["rounds"], result["client_accuracy_gaps"], marker="o", label="accuracy gap")
+        plt.plot(result["rounds"], result["client_accuracy_stds"], marker="o", label="accuracy std")
+        plt.xlabel("Round")
+        plt.ylabel("Client Accuracy Disparity")
+        plt.title("Client Performance Fairness")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "client_performance_fairness.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.plot(result["rounds"], result["epsilon_gaps"], marker="o", label="epsilon gap")
+        plt.plot(result["rounds"], result["epsilon_stds"], marker="o", label="epsilon std")
+        plt.xlabel("Round")
+        plt.ylabel("Privacy Budget Disparity")
+        plt.title("Privacy Budget Fairness")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "privacy_budget_fairness.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.plot(result["rounds"], result["participation_gaps"], marker="o", label="participation gap")
+        plt.plot(result["rounds"], result["participation_stds"], marker="o", label="participation std")
+        plt.xlabel("Round")
+        plt.ylabel("Participation Disparity")
+        plt.title("Client Participation Fairness")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "participation_fairness.png"))
+        plt.close()
+
 
 def _pollution_detection_metrics(result):
     polluted_pairs = {(row["round"], row["client_id"]) for row in result.get("pollution_records", [])}
@@ -711,6 +841,7 @@ def _run_single_method(
         "participation_policy": participation_policy,
         "regulatory_enabled": args.enable_regulatory_intervention and args.experiment_suite in {"baselines", "pollution"},
         "pollution_enabled": args.experiment_suite == "pollution" and args.enable_pollution_injection,
+        "fairness_enabled": args.experiment_suite == "fairness" or args.enable_fairness_evaluation,
         "rounds": [],
         "accuracies": [],
         "balanced_accuracies": [],
@@ -736,6 +867,14 @@ def _run_single_method(
         "regulatory_quarantine_counts": [],
         "regulatory_avg_risks": [],
         "pollution_records": [],
+        "fairness_records": [],
+        "client_accuracy_gaps": [],
+        "client_accuracy_stds": [],
+        "client_min_accuracies": [],
+        "epsilon_gaps": [],
+        "epsilon_stds": [],
+        "participation_gaps": [],
+        "participation_stds": [],
     }
 
     print(f"\n=== Running {config['label']} ({method_name}) ===")
@@ -750,6 +889,7 @@ def _run_single_method(
         )
     polluted_indices = _parse_client_indices(args.polluted_clients, len(clients)) if result["pollution_enabled"] else []
     pollution_rng = np.random.default_rng(args.seed + 9000)
+    participation_counts = [0 for _ in clients]
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
         if config["dynamic_privacy"] and round_num > 1:
@@ -775,6 +915,8 @@ def _run_single_method(
                 rng,
             )
         )
+        for selected_idx in selected_indices:
+            participation_counts[selected_idx] += 1
 
         for idx, client in enumerate(clients):
             if failure_plan[round_num - 1][idx] or idx not in selected_indices:
@@ -913,6 +1055,33 @@ def _run_single_method(
         result["per_client_ebcd_stats"].append(round_ebcd_stats)
         result["per_client_zkip_status"].append(round_zkip_status)
         result["per_client_epsilon"].append(round_epsilons)
+        if result["fairness_enabled"]:
+            fairness_records, fairness_summary = _client_fairness_records(
+                round_num,
+                clients,
+                server.global_model_parameters,
+                classes,
+                num_features,
+                round_epsilons,
+                selected_indices,
+                participation_counts,
+            )
+            result["fairness_records"].extend(fairness_records)
+            result["client_accuracy_gaps"].append(fairness_summary["client_accuracy_gap"])
+            result["client_accuracy_stds"].append(fairness_summary["client_accuracy_std"])
+            result["client_min_accuracies"].append(fairness_summary["client_min_accuracy"])
+            result["epsilon_gaps"].append(fairness_summary["epsilon_gap"])
+            result["epsilon_stds"].append(fairness_summary["epsilon_std"])
+            result["participation_gaps"].append(fairness_summary["participation_gap"])
+            result["participation_stds"].append(fairness_summary["participation_std"])
+        else:
+            result["client_accuracy_gaps"].append(0.0)
+            result["client_accuracy_stds"].append(0.0)
+            result["client_min_accuracies"].append(np.nan)
+            result["epsilon_gaps"].append(0.0)
+            result["epsilon_stds"].append(0.0)
+            result["participation_gaps"].append(0.0)
+            result["participation_stds"].append(0.0)
         if regulatory_controller is not None:
             result["regulatory_records"].extend(regulatory_records)
             result["regulatory_warning_counts"].append(sum(1 for row in regulatory_records if row["action"] == "warning"))
@@ -987,6 +1156,14 @@ def _final_metric_row(method_name, result):
         "total_downweighted": np.nansum(result.get("regulatory_downweight_counts", [])) if result.get("regulatory_downweight_counts") else 0,
         "total_quarantined": np.nansum(result.get("regulatory_quarantine_counts", [])) if result.get("regulatory_quarantine_counts") else 0,
         "avg_regulatory_risk": np.nanmean(result.get("regulatory_avg_risks", [])) if result.get("regulatory_avg_risks") else 0.0,
+        "final_client_accuracy_gap": result["client_accuracy_gaps"][-1] if result.get("client_accuracy_gaps") else 0.0,
+        "avg_client_accuracy_gap": np.nanmean(result.get("client_accuracy_gaps", [])) if result.get("client_accuracy_gaps") else 0.0,
+        "final_client_accuracy_std": result["client_accuracy_stds"][-1] if result.get("client_accuracy_stds") else 0.0,
+        "final_client_min_accuracy": result["client_min_accuracies"][-1] if result.get("client_min_accuracies") else np.nan,
+        "final_epsilon_gap": result["epsilon_gaps"][-1] if result.get("epsilon_gaps") else 0.0,
+        "avg_epsilon_gap": np.nanmean(result.get("epsilon_gaps", [])) if result.get("epsilon_gaps") else 0.0,
+        "final_participation_gap": result["participation_gaps"][-1] if result.get("participation_gaps") else 0.0,
+        "avg_participation_gap": np.nanmean(result.get("participation_gaps", [])) if result.get("participation_gaps") else 0.0,
     }
     row.update(_pollution_detection_metrics(result))
     return row
@@ -1066,6 +1243,52 @@ def _save_suite_summary(output_dir, method_results):
         plt.legend()
         plt.tight_layout()
         charts.save_figure(os.path.join(output_dir, "regulatory_risk_by_client.png"))
+        plt.close()
+
+    fairness_rows = []
+    for method_name, result in method_results.items():
+        for row in result.get("fairness_records", []):
+            fairness_rows.append({"method": method_name, **row})
+    if fairness_rows:
+        _write_csv(os.path.join(output_dir, "client_fairness_summary.csv"), fairness_rows)
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for method_name, result in method_results.items():
+            if result.get("client_accuracy_gaps"):
+                plt.plot(result["rounds"], result["client_accuracy_gaps"], marker="o", label=method_name)
+        plt.xlabel("Round")
+        plt.ylabel("Client Accuracy Gap")
+        plt.title("Client Performance Fairness")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "client_performance_fairness.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for method_name, result in method_results.items():
+            if result.get("epsilon_gaps"):
+                plt.plot(result["rounds"], result["epsilon_gaps"], marker="o", label=method_name)
+        plt.xlabel("Round")
+        plt.ylabel("Privacy Budget Gap")
+        plt.title("Privacy Budget Fairness")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "privacy_budget_fairness.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for method_name, result in method_results.items():
+            if result.get("participation_gaps"):
+                plt.plot(result["rounds"], result["participation_gaps"], marker="o", label=method_name)
+        plt.xlabel("Round")
+        plt.ylabel("Participation Count Gap")
+        plt.title("Client Participation Fairness")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "participation_fairness.png"))
         plt.close()
 
     plt.figure(figsize=charts.FIGSIZE_COMPARISON)
@@ -1301,6 +1524,34 @@ def run_pollution_injection_suite(args, output_dir):
     charts.save_figure(os.path.join(output_dir, "pollution_detection_rate.png"))
     plt.close()
     print(f"Pollution injection suite artifacts saved to: {output_dir}")
+
+
+def run_fairness_suite(args, output_dir):
+    methods = _parse_csv_list(args.fairness_methods, FAIRNESS_METHODS, "fairness methods")
+    privacy_config = make_privacy_config(args)
+    print(f"Running client fairness suite: methods={methods}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+
+    train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    method_results = {}
+    for method_name in methods:
+        method_args = copy.copy(args)
+        method_args.enable_fairness_evaluation = True
+        method_output_dir = os.path.join(output_dir, method_name)
+        method_results[method_name] = _run_single_method(
+            method_name,
+            method_args,
+            train_val_data,
+            X_test,
+            y_test,
+            classes,
+            failure_plan,
+            method_output_dir,
+            privacy_config,
+        )
+    _save_suite_summary(output_dir, method_results)
+    print(f"Client fairness suite artifacts saved to: {output_dir}")
 
 
 def run_participation_suite(args, output_dir):
