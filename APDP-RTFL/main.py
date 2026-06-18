@@ -52,8 +52,8 @@ def parse_args():
     parser.add_argument("--run-name", default=None,
                         help="本次实验目录名。默认自动使用 数据集_YYYYmmdd_HHMMSS。")
     parser.add_argument("--experiment-suite", default="single",
-                        choices=["single", "baselines", "participation", "privacy_sensitivity"],
-                        help="single runs APDP-RTFL; baselines, participation, and privacy_sensitivity run comparison suites.")
+                        choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution"],
+                        help="single runs APDP-RTFL; baselines, participation, privacy_sensitivity, and pollution run comparison suites.")
     parser.add_argument("--methods", default="all",
                         help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,global_dp,dp_rtfl,apdp_rtfl.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
@@ -94,6 +94,28 @@ def parse_args():
                         help="Comma-separated total privacy budgets for privacy sensitivity experiments.")
     parser.add_argument("--privacy-sensitivity-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
                         help="Methods for privacy sensitivity experiments.")
+    parser.add_argument("--enable-regulatory-intervention", action="store_true",
+                        help="Enable regulatory warning, downweighting, and quarantine in sklearn baseline suites.")
+    parser.add_argument("--reg-warning-threshold", type=float, default=1.5,
+                        help="Regulatory risk threshold for warning actions.")
+    parser.add_argument("--reg-quarantine-threshold", type=float, default=2.5,
+                        help="Regulatory risk threshold for quarantine actions.")
+    parser.add_argument("--reg-penalty-weight", type=float, default=0.5,
+                        help="Penalty weight used to downweight risky client updates.")
+    parser.add_argument("--enable-pollution-injection", action="store_true",
+                        help="Enable data pollution injection inside sklearn experiment suites.")
+    parser.add_argument("--pollution-type", default="label_flip", choices=["label_flip", "feature_noise"],
+                        help="Data pollution type for pollution experiments.")
+    parser.add_argument("--polluted-clients", default="1",
+                        help="Comma-separated zero-based client indices to pollute, e.g. 1,3.")
+    parser.add_argument("--pollution-start-round", type=int, default=1,
+                        help="First round to inject pollution.")
+    parser.add_argument("--pollution-end-round", type=int, default=0,
+                        help="Last round to inject pollution. Use 0 to continue through the final round.")
+    parser.add_argument("--pollution-rate", type=float, default=0.3,
+                        help="Fraction of a polluted client's local samples to corrupt per polluted round.")
+    parser.add_argument("--pollution-feature-noise-std", type=float, default=2.0,
+                        help="Gaussian feature noise standard deviation for feature_noise pollution.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -310,20 +332,22 @@ def main():
     DP_EPSILON = args.dp_epsilon
     DP_DELTA = args.dp_delta
     DP_L2_NORM_CLIP = args.dp_l2_norm_clip
-    if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity"}:
+    if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution"}:
         if args.backend == "torch":
             from torch_baselines import run_torch_baseline_suite
             if args.experiment_suite != "baselines":
-                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity suites.")
+                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity/pollution suites.")
             run_torch_baseline_suite(args, output_dir)
         else:
-            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite
+            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite
             if args.experiment_suite == "baselines":
                 run_baseline_suite(args, output_dir)
             elif args.experiment_suite == "participation":
                 run_participation_suite(args, output_dir)
-            else:
+            elif args.experiment_suite == "privacy_sensitivity":
                 run_privacy_sensitivity_suite(args, output_dir)
+            else:
+                run_pollution_injection_suite(args, output_dir)
         return
     if args.backend == "torch":
         from torch_baselines import run_torch_baseline_suite

@@ -1,4 +1,5 @@
 import csv
+import copy
 import json
 import os
 import time
@@ -25,6 +26,7 @@ EARLYSTOP_PATIENCE = 3
 BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
 PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+POLLUTION_METHODS = ("apdp_rtfl",)
 
 
 class PrivacyRuntimeConfig:
@@ -308,24 +310,31 @@ def _apply_server_dp_to_delta(delta, privacy_config):
 
 def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip, privacy_config=None, apply_server_dp=False):
     valid = []
-    total_weight = 0
+    total_weight = 0.0
     aggregated_from = []
     zkip_failures = 0
-    for delta, proof, client_id, data_size in deltas_with_sizes:
+    for update in deltas_with_sizes:
+        if len(update) == 5:
+            delta, proof, client_id, data_size, adjusted_weight = update
+        else:
+            delta, proof, client_id, data_size = update
+            adjusted_weight = data_size
         if delta is None:
             continue
         if verify_zkip and not zkip.verify_proof(delta, proof):
             zkip_failures += 1
             continue
-        valid.append((delta, data_size))
-        total_weight += data_size
+        if adjusted_weight <= 0:
+            continue
+        valid.append((delta, adjusted_weight))
+        total_weight += adjusted_weight
         aggregated_from.append(client_id)
     if not valid or total_weight == 0:
         return base_params, False, aggregated_from, zkip_failures, 0.0
 
     aggregated_delta = {k: np.zeros_like(v) for k, v in valid[0][0].items()}
-    for delta, data_size in valid:
-        weight = data_size / total_weight
+    for delta, adjusted_weight in valid:
+        weight = adjusted_weight / total_weight
         for key in aggregated_delta:
             aggregated_delta[key] += delta[key] * weight
     next_params = {k: np.copy(v) for k, v in base_params.items()}
@@ -335,6 +344,97 @@ def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip, privacy
     for key in aggregated_delta:
         next_params[key] += aggregated_delta[key]
     return next_params, True, aggregated_from, zkip_failures, server_noise_scale
+
+
+class RegulatoryInterventionController:
+    def __init__(self, warning_threshold=1.5, quarantine_threshold=2.5, penalty_weight=0.5):
+        self.warning_threshold = warning_threshold
+        self.quarantine_threshold = quarantine_threshold
+        self.penalty_weight = penalty_weight
+        self.downweight_threshold = (warning_threshold + quarantine_threshold) / 2.0
+
+    @staticmethod
+    def _safe_float(value):
+        if value is None:
+            return np.nan
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return np.nan
+        return value if np.isfinite(value) else np.nan
+
+    def _relative_deviation(self, value, baseline):
+        value = self._safe_float(value)
+        baseline = self._safe_float(baseline)
+        if not np.isfinite(value):
+            return 0.0
+        if not np.isfinite(baseline) or abs(baseline) < 1e-12:
+            return abs(value)
+        return abs(value - baseline) / abs(baseline)
+
+    def _risk_score(self, update_norm, ebcd_stats, zkip_status, median_norm, median_stats):
+        if zkip_status is False:
+            return self.quarantine_threshold + 1.0
+        norm_score = self._relative_deviation(update_norm, median_norm)
+        stat_scores = []
+        for idx, value in enumerate(ebcd_stats or (None, None, None)):
+            stat_scores.append(self._relative_deviation(value, median_stats[idx]))
+        ebcd_score = max(stat_scores) if stat_scores else 0.0
+        return norm_score + 0.5 * ebcd_score
+
+    def _action_for_score(self, score):
+        if score >= self.quarantine_threshold:
+            return "quarantine"
+        if score >= self.downweight_threshold:
+            return "downweight"
+        if score >= self.warning_threshold:
+            return "warning"
+        return "normal"
+
+    def evaluate_round(self, round_num, clients, selected_indices, update_norms, ebcd_stats, zkip_status):
+        valid_norms = [self._safe_float(update_norms[idx]) for idx in selected_indices if np.isfinite(self._safe_float(update_norms[idx]))]
+        median_norm = float(np.median(valid_norms)) if valid_norms else 0.0
+        median_stats = []
+        for stat_idx in range(3):
+            values = [
+                self._safe_float(ebcd_stats[idx][stat_idx])
+                for idx in selected_indices
+                if ebcd_stats[idx] is not None and np.isfinite(self._safe_float(ebcd_stats[idx][stat_idx]))
+            ]
+            median_stats.append(float(np.median(values)) if values else 0.0)
+
+        records = []
+        adjusted_weights = {}
+        for idx in selected_indices:
+            client = clients[idx]
+            original_weight = len(client.y_train)
+            score = self._risk_score(update_norms[idx], ebcd_stats[idx], zkip_status[idx], median_norm, median_stats)
+            action = self._action_for_score(score)
+            if action == "quarantine":
+                adjusted_weight = 0.0
+            elif action == "downweight":
+                normalized_score = min(1.0, score / max(self.quarantine_threshold, 1e-12))
+                adjusted_weight = original_weight * max(0.0, 1.0 - self.penalty_weight * normalized_score)
+            else:
+                adjusted_weight = float(original_weight)
+            adjusted_weights[client.client_id] = adjusted_weight
+            stat_values = ebcd_stats[idx] or (None, None, None)
+            records.append(
+                {
+                    "round": round_num,
+                    "client_id": client.client_id,
+                    "risk_score": score,
+                    "action": action,
+                    "original_weight": original_weight,
+                    "adjusted_weight": adjusted_weight,
+                    "zkip_status": zkip_status[idx],
+                    "update_norm": update_norms[idx],
+                    "ebcd_variance": stat_values[0],
+                    "ebcd_kurtosis": stat_values[1],
+                    "ebcd_skewness": stat_values[2],
+                }
+            )
+        return records, adjusted_weights
 
 
 def _make_eval_server(method_name, client_ids, num_features, classes, params):
@@ -349,6 +449,59 @@ def _parse_csv_list(value, allowed, name):
     if invalid:
         raise ValueError(f"Unsupported {name}: {invalid}. Supported: {allowed}")
     return items
+
+
+def _parse_client_indices(value, num_clients):
+    indices = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        idx = int(item)
+        if idx < 0 or idx >= num_clients:
+            raise ValueError(f"Invalid polluted client index {idx}. Expected 0 <= idx < {num_clients}.")
+        indices.append(idx)
+    return sorted(set(indices))
+
+
+def _pollution_active(args, round_num):
+    if args.experiment_suite != "pollution" or not args.enable_pollution_injection:
+        return False
+    end_round = args.pollution_end_round if args.pollution_end_round > 0 else args.num_rounds
+    return args.pollution_start_round <= round_num <= end_round
+
+
+def _apply_client_pollution(client, classes, args, rng):
+    sample_count = len(client.y_train)
+    if sample_count == 0:
+        return None, None, None, 0
+    polluted_count = max(1, int(np.ceil(sample_count * args.pollution_rate)))
+    polluted_count = min(polluted_count, sample_count)
+    sample_indices = rng.choice(sample_count, size=polluted_count, replace=False)
+    original_X = np.copy(client.X_train)
+    original_y = np.copy(client.y_train)
+
+    if args.pollution_type == "label_flip":
+        class_values = np.asarray(classes, dtype=int)
+        class_to_pos = {label: pos for pos, label in enumerate(class_values)}
+        flipped = np.copy(client.y_train[sample_indices])
+        for i, label in enumerate(flipped):
+            pos = class_to_pos.get(int(label), 0)
+            flipped[i] = class_values[(pos + 1) % len(class_values)]
+        client.y_train[sample_indices] = flipped
+    elif args.pollution_type == "feature_noise":
+        noise = rng.normal(0, args.pollution_feature_noise_std, size=client.X_train[sample_indices].shape)
+        client.X_train[sample_indices] = client.X_train[sample_indices] + noise
+    else:
+        raise ValueError(f"Unsupported pollution type: {args.pollution_type}")
+    return original_X, original_y, sample_indices, polluted_count
+
+
+def _restore_client_data(client, original_X, original_y):
+    if original_X is not None:
+        client.X_train = original_X
+    if original_y is not None:
+        client.y_train = original_y
 
 
 def _select_participants(policy, available_indices, clients, capabilities, contribution_scores, participation_rate, rng):
@@ -440,6 +593,85 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
     charts.save_figure(os.path.join(output_dir, "per_client_update_norms.png"))
     plt.close()
 
+    if result.get("regulatory_enabled"):
+        regulatory_rows = result.get("regulatory_records", [])
+        fieldnames = [
+            "round",
+            "client_id",
+            "risk_score",
+            "action",
+            "original_weight",
+            "adjusted_weight",
+            "zkip_status",
+            "update_norm",
+            "ebcd_variance",
+            "ebcd_kurtosis",
+            "ebcd_skewness",
+        ]
+        with open(os.path.join(output_dir, "regulatory_intervention_summary.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(regulatory_rows)
+
+        rounds = result["rounds"]
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.plot(rounds, result["regulatory_warning_counts"], marker="o", label="warning")
+        plt.plot(rounds, result["regulatory_downweight_counts"], marker="o", label="downweight")
+        plt.plot(rounds, result["regulatory_quarantine_counts"], marker="o", label="quarantine")
+        plt.xlabel("Round")
+        plt.ylabel("Client Count")
+        plt.title("Regulatory Intervention Actions")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "regulatory_actions.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
+        for client_id in client_ids:
+            rows = [row for row in regulatory_rows if row["client_id"] == client_id]
+            if rows:
+                plt.plot([row["round"] for row in rows], [row["risk_score"] for row in rows], marker="o", label=client_id)
+        plt.xlabel("Round")
+        plt.ylabel("Risk Score")
+        plt.title("Regulatory Risk by Client")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "regulatory_risk_by_client.png"))
+        plt.close()
+
+    if result.get("pollution_enabled"):
+        pollution_rows = result.get("pollution_records", [])
+        fieldnames = ["round", "client_id", "pollution_type", "polluted_sample_count", "pollution_rate"]
+        with open(os.path.join(output_dir, "pollution_injection_summary.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(pollution_rows)
+
+
+def _pollution_detection_metrics(result):
+    polluted_pairs = {(row["round"], row["client_id"]) for row in result.get("pollution_records", [])}
+    regulatory_rows = result.get("regulatory_records", [])
+    actionable = {"warning", "downweight", "quarantine"}
+    detected_pairs = {
+        (row["round"], row["client_id"])
+        for row in regulatory_rows
+        if (row["round"], row["client_id"]) in polluted_pairs and row["action"] in actionable
+    }
+    false_positive_pairs = {
+        (row["round"], row["client_id"])
+        for row in regulatory_rows
+        if (row["round"], row["client_id"]) not in polluted_pairs and row["action"] in actionable
+    }
+    total_polluted = len(polluted_pairs)
+    return {
+        "total_polluted_client_rounds": total_polluted,
+        "detected_polluted_client_rounds": len(detected_pairs),
+        "pollution_detection_rate": len(detected_pairs) / total_polluted if total_polluted else 0.0,
+        "regulatory_false_positive_actions": len(false_positive_pairs),
+    }
+
 
 def _run_single_method(
     method_name,
@@ -477,6 +709,8 @@ def _run_single_method(
         "method": method_name,
         "label": f"{config['label']}{label_suffix}",
         "participation_policy": participation_policy,
+        "regulatory_enabled": args.enable_regulatory_intervention and args.experiment_suite in {"baselines", "pollution"},
+        "pollution_enabled": args.experiment_suite == "pollution" and args.enable_pollution_injection,
         "rounds": [],
         "accuracies": [],
         "balanced_accuracies": [],
@@ -496,11 +730,26 @@ def _run_single_method(
         "per_client_ebcd_stats": [],
         "per_client_zkip_status": [],
         "per_client_epsilon": [],
+        "regulatory_records": [],
+        "regulatory_warning_counts": [],
+        "regulatory_downweight_counts": [],
+        "regulatory_quarantine_counts": [],
+        "regulatory_avg_risks": [],
+        "pollution_records": [],
     }
 
     print(f"\n=== Running {config['label']} ({method_name}) ===")
     rng = np.random.default_rng(args.seed + 5000)
     contribution_scores = {idx: 0.0 for idx in range(len(clients))}
+    regulatory_controller = None
+    if result["regulatory_enabled"]:
+        regulatory_controller = RegulatoryInterventionController(
+            warning_threshold=args.reg_warning_threshold,
+            quarantine_threshold=args.reg_quarantine_threshold,
+            penalty_weight=args.reg_penalty_weight,
+        )
+    polluted_indices = _parse_client_indices(args.polluted_clients, len(clients)) if result["pollution_enabled"] else []
+    pollution_rng = np.random.default_rng(args.seed + 9000)
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
         if config["dynamic_privacy"] and round_num > 1:
@@ -545,12 +794,32 @@ def _run_single_method(
                 idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config
             )
             client.set_global_model_parameters(global_params)
-            delta, proof = client.train(
-                epochs=effective_epochs,
-                use_dp=config["dp_scope"] == "client",
-                fedprox_mu=args.fedprox_mu if config["fedprox"] else 0.0,
-                global_params=global_params,
-            )
+            original_X, original_y, polluted_sample_indices, polluted_sample_count = None, None, None, 0
+            if idx in polluted_indices and _pollution_active(args, round_num):
+                original_X, original_y, polluted_sample_indices, polluted_sample_count = _apply_client_pollution(
+                    client,
+                    classes,
+                    args,
+                    pollution_rng,
+                )
+                result["pollution_records"].append(
+                    {
+                        "round": round_num,
+                        "client_id": client.client_id,
+                        "pollution_type": args.pollution_type,
+                        "polluted_sample_count": polluted_sample_count,
+                        "pollution_rate": args.pollution_rate,
+                    }
+                )
+            try:
+                delta, proof = client.train(
+                    epochs=effective_epochs,
+                    use_dp=config["dp_scope"] == "client",
+                    fedprox_mu=args.fedprox_mu if config["fedprox"] else 0.0,
+                    global_params=global_params,
+                )
+            finally:
+                _restore_client_data(client, original_X, original_y)
             if delta is None:
                 round_update_norms.append(None)
                 round_ebcd_stats.append((None, None, None))
@@ -574,6 +843,25 @@ def _run_single_method(
                 noise_stddev = 0.0
             round_noise_scales.append(noise_stddev)
 
+        regulatory_records = []
+        adjusted_weights = {}
+        regulatory_zkip_failures = 0
+        if regulatory_controller is not None:
+            regulatory_records, adjusted_weights = regulatory_controller.evaluate_round(
+                round_num,
+                clients,
+                selected_indices,
+                round_update_norms,
+                round_ebcd_stats,
+                round_zkip_status,
+            )
+            regulatory_zkip_failures = sum(1 for row in regulatory_records if row["zkip_status"] is False)
+            client_updates = [
+                (delta, proof, client_id, data_size, adjusted_weights.get(client_id, data_size))
+                for delta, proof, client_id, data_size in client_updates
+                if adjusted_weights.get(client_id, data_size) > 0
+            ]
+
         server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_deltas(
             server.global_model_parameters,
             client_updates,
@@ -582,6 +870,7 @@ def _run_single_method(
             privacy_config=privacy_config,
             apply_server_dp=config["dp_scope"] == "server",
         )
+        zkip_failures += regulatory_zkip_failures
         ebcd_alert = 1 if config["use_ebcd"] and server.ebcd.check_for_corruption(server.global_model_parameters) else 0
         if config["use_tcm"]:
             state_details = {
@@ -624,6 +913,18 @@ def _run_single_method(
         result["per_client_ebcd_stats"].append(round_ebcd_stats)
         result["per_client_zkip_status"].append(round_zkip_status)
         result["per_client_epsilon"].append(round_epsilons)
+        if regulatory_controller is not None:
+            result["regulatory_records"].extend(regulatory_records)
+            result["regulatory_warning_counts"].append(sum(1 for row in regulatory_records if row["action"] == "warning"))
+            result["regulatory_downweight_counts"].append(sum(1 for row in regulatory_records if row["action"] == "downweight"))
+            result["regulatory_quarantine_counts"].append(sum(1 for row in regulatory_records if row["action"] == "quarantine"))
+            risks = [row["risk_score"] for row in regulatory_records if np.isfinite(row["risk_score"])]
+            result["regulatory_avg_risks"].append(float(np.mean(risks)) if risks else 0.0)
+        else:
+            result["regulatory_warning_counts"].append(0)
+            result["regulatory_downweight_counts"].append(0)
+            result["regulatory_quarantine_counts"].append(0)
+            result["regulatory_avg_risks"].append(0.0)
 
         contribution_history.append(
             {
@@ -664,7 +965,7 @@ def _parse_methods(methods_arg):
 
 
 def _final_metric_row(method_name, result):
-    return {
+    row = {
         "method": method_name,
         "label": result["label"],
         "final_accuracy": result["accuracies"][-1] if result["accuracies"] else np.nan,
@@ -682,7 +983,13 @@ def _final_metric_row(method_name, result):
         "total_zkip_failures": np.nansum(result["zkip_failures"]) if result["zkip_failures"] else 0,
         "total_ebcd_alerts": np.nansum(result["ebcd_alerts"]) if result["ebcd_alerts"] else 0,
         "final_tcm_state_count": result["tcm_counts"][-1] if result["tcm_counts"] else 0,
+        "total_warnings": np.nansum(result.get("regulatory_warning_counts", [])) if result.get("regulatory_warning_counts") else 0,
+        "total_downweighted": np.nansum(result.get("regulatory_downweight_counts", [])) if result.get("regulatory_downweight_counts") else 0,
+        "total_quarantined": np.nansum(result.get("regulatory_quarantine_counts", [])) if result.get("regulatory_quarantine_counts") else 0,
+        "avg_regulatory_risk": np.nanmean(result.get("regulatory_avg_risks", [])) if result.get("regulatory_avg_risks") else 0.0,
     }
+    row.update(_pollution_detection_metrics(result))
+    return row
 
 
 def _save_suite_summary(output_dir, method_results):
@@ -716,6 +1023,50 @@ def _save_suite_summary(output_dir, method_results):
             writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["method"])
             writer.writeheader()
             writer.writerows(rows)
+
+    regulatory_rows = []
+    for method_name, result in method_results.items():
+        for row in result.get("regulatory_records", []):
+            regulatory_rows.append({"method": method_name, **row})
+    if regulatory_rows:
+        _write_csv(os.path.join(output_dir, "regulatory_intervention_summary.csv"), regulatory_rows)
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for action_key, label in (
+            ("regulatory_warning_counts", "warning"),
+            ("regulatory_downweight_counts", "downweight"),
+            ("regulatory_quarantine_counts", "quarantine"),
+        ):
+            totals = []
+            rounds = next(iter(method_results.values()))["rounds"] if method_results else []
+            for idx, _ in enumerate(rounds):
+                totals.append(sum(result.get(action_key, [0] * len(rounds))[idx] for result in method_results.values()))
+            plt.plot(rounds, totals, marker="o", label=label)
+        plt.xlabel("Round")
+        plt.ylabel("Client Count")
+        plt.title("Regulatory Intervention Actions")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "regulatory_actions.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
+        client_keys = sorted({(row["method"], row["client_id"]) for row in regulatory_rows})
+        for method_name, client_id in client_keys:
+            rows = [
+                row for row in regulatory_rows
+                if row["method"] == method_name and row["client_id"] == client_id
+            ]
+            plt.plot([row["round"] for row in rows], [row["risk_score"] for row in rows], marker="o", label=f"{method_name}:{client_id}")
+        plt.xlabel("Round")
+        plt.ylabel("Risk Score")
+        plt.title("Regulatory Risk by Client")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "regulatory_risk_by_client.png"))
+        plt.close()
 
     plt.figure(figsize=charts.FIGSIZE_COMPARISON)
     for metric_idx, (metric_key, title) in enumerate(
@@ -861,6 +1212,95 @@ def run_baseline_suite(args, output_dir):
         )
     _save_suite_summary(output_dir, method_results)
     print(f"Baseline suite artifacts saved to: {output_dir}")
+
+
+def run_pollution_injection_suite(args, output_dir):
+    methods = _parse_csv_list(args.methods if args.methods != "all" else "apdp_rtfl", POLLUTION_METHODS, "pollution methods")
+    privacy_config = make_privacy_config(args)
+    print(f"Running pollution injection suite: methods={methods}, type={args.pollution_type}, clients={args.polluted_clients}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+
+    train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    scenario_results = {}
+    final_rows = []
+    summary_rows = []
+    pollution_rows = []
+    regulatory_rows = []
+
+    for method_name in methods:
+        scenarios = (
+            ("pollution_no_intervention", False),
+            ("pollution_with_intervention", True),
+        )
+        for scenario_name, enable_regulatory in scenarios:
+            scenario_args = copy.copy(args)
+            scenario_args.enable_pollution_injection = True
+            scenario_args.enable_regulatory_intervention = enable_regulatory
+            scenario_output_dir = os.path.join(output_dir, scenario_name, method_name)
+            result = _run_single_method(
+                method_name,
+                scenario_args,
+                train_val_data,
+                X_test,
+                y_test,
+                classes,
+                failure_plan,
+                scenario_output_dir,
+                privacy_config,
+                label_suffix=f" ({scenario_name})",
+            )
+            scenario_key = f"{method_name}_{scenario_name}"
+            scenario_results[scenario_key] = result
+            final_row = _final_metric_row(scenario_key, result)
+            final_row["method"] = method_name
+            final_row["scenario"] = scenario_name
+            final_rows.append(final_row)
+            for idx, round_num in enumerate(result["rounds"]):
+                summary_rows.append(
+                    {
+                        "method": method_name,
+                        "scenario": scenario_name,
+                        "round": round_num,
+                        "accuracy": result["accuracies"][idx],
+                        "balanced_accuracy": result["balanced_accuracies"][idx],
+                        "f1_score": result["f1_scores"][idx],
+                        "agg_client_count": result["agg_client_counts"][idx],
+                        "total_regulatory_actions": (
+                            result["regulatory_warning_counts"][idx]
+                            + result["regulatory_downweight_counts"][idx]
+                            + result["regulatory_quarantine_counts"][idx]
+                        ),
+                        "avg_regulatory_risk": result["regulatory_avg_risks"][idx],
+                    }
+                )
+            for row in result.get("pollution_records", []):
+                pollution_rows.append({"method": method_name, "scenario": scenario_name, **row})
+            for row in result.get("regulatory_records", []):
+                regulatory_rows.append({"method": method_name, "scenario": scenario_name, **row})
+
+    _write_csv(os.path.join(output_dir, "pollution_summary.csv"), summary_rows)
+    _write_csv(os.path.join(output_dir, "pollution_final_metrics.csv"), final_rows)
+    _write_csv(os.path.join(output_dir, "pollution_injection_summary.csv"), pollution_rows)
+    if regulatory_rows:
+        _write_csv(os.path.join(output_dir, "regulatory_intervention_summary.csv"), regulatory_rows)
+
+    _plot_group_metric(summary_rows, "scenario", "accuracy", os.path.join(output_dir, "pollution_accuracy.png"), "Accuracy", "Pollution Scenario Accuracy")
+    _plot_group_metric(summary_rows, "scenario", "f1_score", os.path.join(output_dir, "pollution_f1.png"), "Macro-F1", "Pollution Scenario Macro-F1")
+    _plot_group_metric(summary_rows, "scenario", "total_regulatory_actions", os.path.join(output_dir, "pollution_regulatory_actions.png"), "Regulatory Actions", "Regulatory Actions under Pollution")
+
+    plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+    scenarios = [row["scenario"] for row in final_rows]
+    detection_rates = [row["pollution_detection_rate"] for row in final_rows]
+    plt.bar(scenarios, detection_rates)
+    plt.ylabel("Detection Rate")
+    plt.title("Pollution Detection Rate")
+    plt.ylim(0, 1.05)
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+    charts.save_figure(os.path.join(output_dir, "pollution_detection_rate.png"))
+    plt.close()
+    print(f"Pollution injection suite artifacts saved to: {output_dir}")
 
 
 def run_participation_suite(args, output_dir):
