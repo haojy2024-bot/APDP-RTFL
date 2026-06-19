@@ -1,5 +1,6 @@
 import csv
 import copy
+import hashlib
 import json
 import os
 import time
@@ -31,6 +32,18 @@ PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 POLLUTION_METHODS = ("apdp_rtfl",)
 FAIRNESS_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 CONTRIBUTION_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+AUDIT_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+ABLATION_SCENARIOS = (
+    "full",
+    "no_adaptive_privacy",
+    "no_compute_adapter",
+    "no_zkip",
+    "no_ebcd",
+    "no_tcm",
+    "no_regulatory",
+    "no_contribution",
+    "no_fairness",
+)
 SYNTHETIC_FAIRNESS_DATASETS = ("emnist", "femnist", "cifar10", "cifar100")
 
 
@@ -797,11 +810,17 @@ def _minmax_normalize(values):
     }
 
 
-def _data_quality_component(client, classes, max_sample_count):
+def _data_quality_components(client, classes, max_sample_count):
     entropy_score = _compute_data_quality_score(client.y_train)
     sample_score = len(client.y_train) / max(max_sample_count, 1)
     coverage_score = len(np.unique(client.y_train)) / max(len(classes), 1)
-    return float(0.5 * entropy_score + 0.3 * sample_score + 0.2 * coverage_score)
+    composite_score = float(0.5 * entropy_score + 0.3 * sample_score + 0.2 * coverage_score)
+    return {
+        "data_entropy_score": float(entropy_score),
+        "sample_size_score": float(sample_score),
+        "class_coverage_score": float(coverage_score),
+        "data_quality_score": composite_score,
+    }
 
 
 def _fairness_penalty_map(fairness_records):
@@ -909,7 +928,8 @@ class ContributionPenaltyEvaluator:
         records = []
         for idx, client in enumerate(clients):
             selected = idx in selected_indices
-            quality_score = _data_quality_component(client, self.classes, max_sample_count)
+            quality_components = _data_quality_components(client, self.classes, max_sample_count)
+            quality_score = quality_components["data_quality_score"]
             approx_shapley = shapley_values[idx] if selected else 0.0
             shapley_score = normalized_shapley.get(idx, 0.0) if selected else 0.0
             regulatory_record = regulatory_by_client.get(client.client_id)
@@ -934,12 +954,15 @@ class ContributionPenaltyEvaluator:
                     "round": round_num,
                     "client_id": client.client_id,
                     "selected": selected,
-                    "data_quality_score": quality_score,
+                    **quality_components,
                     "approx_shapley": approx_shapley,
                     "normalized_shapley": shapley_score,
                     "risk_penalty": risk_penalty,
                     "fairness_penalty": fairness_penalty,
                     "final_contribution_score": final_score,
+                    "normalized_adjusted_weight": 0.0,
+                    "normalized_positive_contribution": 0.0,
+                    "contribution_weight_alignment_error": 0.0,
                     "update_norm": round_update_norms[idx] if idx < len(round_update_norms) else None,
                     "adjusted_weight": adjusted_weight,
                     "regulatory_action": action,
@@ -948,8 +971,29 @@ class ContributionPenaltyEvaluator:
                 }
             )
 
+        selected_records = [record for record in records if record["selected"]]
+        total_adjusted_weight = sum(max(0.0, _metric_value(record["adjusted_weight"])) for record in selected_records)
+        total_positive_score = sum(max(0.0, _metric_value(record["final_contribution_score"])) for record in selected_records)
+        for record in selected_records:
+            normalized_weight = (
+                max(0.0, _metric_value(record["adjusted_weight"])) / total_adjusted_weight
+                if total_adjusted_weight > 0 else 0.0
+            )
+            normalized_contribution = (
+                max(0.0, _metric_value(record["final_contribution_score"])) / total_positive_score
+                if total_positive_score > 0 else 0.0
+            )
+            record["normalized_adjusted_weight"] = normalized_weight
+            record["normalized_positive_contribution"] = normalized_contribution
+            record["contribution_weight_alignment_error"] = abs(normalized_contribution - normalized_weight)
+
         score_gap, score_std, _ = _spread(score_values)
         shapley_gap, shapley_std, _ = _spread([record["approx_shapley"] for record in records if record["selected"]])
+        alignment_errors = [
+            record["contribution_weight_alignment_error"]
+            for record in records
+            if record["selected"] and np.isfinite(_metric_value(record["contribution_weight_alignment_error"]))
+        ]
         summary = {
             "avg_contribution_score": float(np.mean(score_values)) if score_values else 0.0,
             "contribution_score_gap": score_gap,
@@ -959,6 +1003,8 @@ class ContributionPenaltyEvaluator:
             "approx_shapley_std": shapley_std,
             "avg_risk_penalty": float(np.mean([record["risk_penalty"] for record in records if record["selected"]])) if score_values else 0.0,
             "avg_fairness_penalty": float(np.mean([record["fairness_penalty"] for record in records if record["selected"]])) if score_values else 0.0,
+            "avg_weight_alignment_error": float(np.mean(alignment_errors)) if alignment_errors else 0.0,
+            "max_weight_alignment_error": float(max(alignment_errors)) if alignment_errors else 0.0,
         }
         return records, summary
 
@@ -1278,6 +1324,18 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
         charts.save_figure(os.path.join(output_dir, "penalty_components.png"))
         plt.close()
 
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.plot(result["rounds"], result.get("avg_weight_alignment_errors", []), marker="o", label="average error")
+        plt.plot(result["rounds"], result.get("max_weight_alignment_errors", []), marker="o", label="max error")
+        plt.xlabel("Round")
+        plt.ylabel("Alignment Error")
+        plt.title("Contribution-Weight Alignment")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "contribution_weight_alignment.png"))
+        plt.close()
+
 
 def _pollution_detection_metrics(result):
     polluted_pairs = {(row["round"], row["client_id"]) for row in result.get("pollution_records", [])}
@@ -1317,8 +1375,12 @@ def _run_single_method(
     label_suffix="",
     synthetic_metadata=None,
     capability_overrides=None,
+    config_overrides=None,
+    ablation_scenario=None,
 ):
-    config = METHOD_CONFIGS[method_name]
+    config = copy.deepcopy(METHOD_CONFIGS[method_name])
+    if config_overrides:
+        config.update(config_overrides)
     num_features = X_test.shape[1]
     clients = _init_clients(train_val_data, num_features, classes, args.seed, privacy_config)
     client_ids = [client.client_id for client in clients]
@@ -1340,13 +1402,14 @@ def _run_single_method(
         "method": method_name,
         "label": f"{config['label']}{label_suffix}",
         "participation_policy": participation_policy,
+        "ablation_scenario": ablation_scenario or "",
         "regulatory_enabled": (
-            args.experiment_suite == "contribution"
-            or (args.enable_regulatory_intervention and args.experiment_suite in {"baselines", "pollution", "synthetic_fairness", "contribution"})
+            args.experiment_suite in {"contribution", "audit_trace"}
+            or (args.enable_regulatory_intervention and args.experiment_suite in {"baselines", "pollution", "synthetic_fairness", "contribution", "audit_trace", "ablation"})
         ),
         "pollution_enabled": args.experiment_suite == "pollution" and args.enable_pollution_injection,
-        "fairness_enabled": args.experiment_suite in {"fairness", "synthetic_fairness", "contribution"} or args.enable_fairness_evaluation,
-        "contribution_enabled": args.experiment_suite == "contribution" or args.enable_contribution_evaluation,
+        "fairness_enabled": args.experiment_suite in {"fairness", "synthetic_fairness", "contribution", "audit_trace"} or args.enable_fairness_evaluation,
+        "contribution_enabled": args.experiment_suite in {"contribution", "audit_trace"} or args.enable_contribution_evaluation,
         "synthetic_sensitive_metadata": synthetic_metadata or [],
         "rounds": [],
         "accuracies": [],
@@ -1390,6 +1453,8 @@ def _run_single_method(
         "approx_shapley_stds": [],
         "avg_risk_penalties": [],
         "avg_fairness_penalties": [],
+        "avg_weight_alignment_errors": [],
+        "max_weight_alignment_errors": [],
         "final_group_accuracy_gap": 0.0,
         "final_worst_group_accuracy": np.nan,
         "final_group_f1_gap": 0.0,
@@ -1644,6 +1709,8 @@ def _run_single_method(
             result["approx_shapley_stds"].append(contribution_summary["approx_shapley_std"])
             result["avg_risk_penalties"].append(contribution_summary["avg_risk_penalty"])
             result["avg_fairness_penalties"].append(contribution_summary["avg_fairness_penalty"])
+            result["avg_weight_alignment_errors"].append(contribution_summary["avg_weight_alignment_error"])
+            result["max_weight_alignment_errors"].append(contribution_summary["max_weight_alignment_error"])
         else:
             result["avg_contribution_scores"].append(0.0)
             result["contribution_score_gaps"].append(0.0)
@@ -1653,6 +1720,8 @@ def _run_single_method(
             result["approx_shapley_stds"].append(0.0)
             result["avg_risk_penalties"].append(0.0)
             result["avg_fairness_penalties"].append(0.0)
+            result["avg_weight_alignment_errors"].append(0.0)
+            result["max_weight_alignment_errors"].append(0.0)
 
         contribution_history.append(
             {
@@ -1735,6 +1804,8 @@ def _final_metric_row(method_name, result):
         "final_approx_shapley_gap": result["approx_shapley_gaps"][-1] if result.get("approx_shapley_gaps") else 0.0,
         "avg_risk_penalty": np.nanmean(result.get("avg_risk_penalties", [])) if result.get("avg_risk_penalties") else 0.0,
         "avg_fairness_penalty": np.nanmean(result.get("avg_fairness_penalties", [])) if result.get("avg_fairness_penalties") else 0.0,
+        "avg_weight_alignment_error": np.nanmean(result.get("avg_weight_alignment_errors", [])) if result.get("avg_weight_alignment_errors") else 0.0,
+        "max_weight_alignment_error": np.nanmax(result.get("max_weight_alignment_errors", [])) if result.get("max_weight_alignment_errors") else 0.0,
     }
     row.update(_pollution_detection_metrics(result))
     return row
@@ -1910,6 +1981,21 @@ def _save_suite_summary(output_dir, method_results):
         charts.save_figure(os.path.join(output_dir, "penalty_components.png"))
         plt.close()
 
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for method_name, result in method_results.items():
+            if result.get("avg_weight_alignment_errors"):
+                plt.plot(result["rounds"], result["avg_weight_alignment_errors"], marker="o", label=f"{method_name} avg")
+            if result.get("max_weight_alignment_errors"):
+                plt.plot(result["rounds"], result["max_weight_alignment_errors"], marker="x", label=f"{method_name} max")
+        plt.xlabel("Round")
+        plt.ylabel("Alignment Error")
+        plt.title("Contribution-Weight Alignment")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "contribution_weight_alignment.png"))
+        plt.close()
+
     plt.figure(figsize=charts.FIGSIZE_COMPARISON)
     for metric_idx, (metric_key, title) in enumerate(
         (("accuracies", "Accuracy"), ("f1_scores", "Macro-F1"), ("balanced_accuracies", "Balanced Accuracy")),
@@ -2030,6 +2116,173 @@ def _write_csv(path, rows):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _present_for_audit(value):
+    if value is None:
+        return False
+    if value == "":
+        return False
+    try:
+        return np.isfinite(float(value))
+    except (TypeError, ValueError):
+        return True
+
+
+def _audit_hash(payload, previous_hash, algorithm="sha256"):
+    if algorithm != "sha256":
+        raise ValueError(f"Unsupported audit digest algorithm: {algorithm}")
+    safe_payload = json.dumps(_json_safe(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest_input = f"{previous_hash}|{safe_payload}".encode("utf-8")
+    return hashlib.sha256(digest_input).hexdigest()
+
+
+def _build_audit_trace(method_name, result, digest_algorithm="sha256"):
+    regulatory_by_key = {(row["round"], row["client_id"]): row for row in result.get("regulatory_records", [])}
+    fairness_by_key = {(row["round"], row["client_id"]): row for row in result.get("fairness_records", [])}
+    contribution_by_key = {(row["round"], row["client_id"]): row for row in result.get("contribution_records", [])}
+    client_count = 0
+    if result.get("per_client_update_norms"):
+        client_count = len(result["per_client_update_norms"][0])
+    client_ids = [f"client_{idx}" for idx in range(client_count)]
+
+    rows = []
+    previous_hash = "GENESIS"
+    for round_idx, round_num in enumerate(result.get("rounds", [])):
+        update_norms = result.get("per_client_update_norms", [])[round_idx]
+        ebcd_stats = result.get("per_client_ebcd_stats", [])[round_idx]
+        zkip_status = result.get("per_client_zkip_status", [])[round_idx]
+        epsilons = result.get("per_client_epsilon", [])[round_idx]
+        for client_idx, client_id in enumerate(client_ids):
+            key = (round_num, client_id)
+            regulatory = regulatory_by_key.get(key, {})
+            fairness = fairness_by_key.get(key, {})
+            contribution = contribution_by_key.get(key, {})
+            stat_values = ebcd_stats[client_idx] if client_idx < len(ebcd_stats) else (None, None, None)
+            payload = {
+                "method": method_name,
+                "round": round_num,
+                "client_id": client_id,
+                "selected": fairness.get("selected", contribution.get("selected", client_idx < len(update_norms) and update_norms[client_idx] is not None)),
+                "participation_count": fairness.get("participation_count", np.nan),
+                "epsilon": epsilons[client_idx] if client_idx < len(epsilons) else None,
+                "update_norm": update_norms[client_idx] if client_idx < len(update_norms) else None,
+                "zkip_status": zkip_status[client_idx] if client_idx < len(zkip_status) else None,
+                "ebcd_variance": stat_values[0] if stat_values is not None else None,
+                "ebcd_kurtosis": stat_values[1] if stat_values is not None else None,
+                "ebcd_skewness": stat_values[2] if stat_values is not None else None,
+                "regulatory_action": regulatory.get("action", "not_evaluated"),
+                "risk_score": regulatory.get("risk_score", np.nan),
+                "adjusted_weight": regulatory.get("adjusted_weight", contribution.get("adjusted_weight", np.nan)),
+                "local_accuracy": fairness.get("local_accuracy", np.nan),
+                "local_f1_score": fairness.get("local_f1_score", np.nan),
+                "data_quality_score": contribution.get("data_quality_score", np.nan),
+                "approx_shapley": contribution.get("approx_shapley", np.nan),
+                "final_contribution_score": contribution.get("final_contribution_score", np.nan),
+                "contribution_weight_alignment_error": contribution.get("contribution_weight_alignment_error", np.nan),
+            }
+            completeness_fields = [
+                "selected",
+                "epsilon",
+                "update_norm",
+                "zkip_status",
+                "regulatory_action",
+                "risk_score",
+                "adjusted_weight",
+                "local_accuracy",
+                "data_quality_score",
+                "approx_shapley",
+                "final_contribution_score",
+            ]
+            payload["trace_completeness"] = sum(
+                1 for field in completeness_fields if _present_for_audit(payload.get(field))
+            ) / len(completeness_fields)
+            event_hash = _audit_hash(payload, previous_hash, digest_algorithm)
+            rows.append(
+                {
+                    "audit_event_id": len(rows) + 1,
+                    "previous_hash": previous_hash,
+                    "event_hash": event_hash,
+                    **payload,
+                }
+            )
+            previous_hash = event_hash
+    return rows
+
+
+def _verify_audit_trace(rows, digest_algorithm="sha256"):
+    verification_rows = []
+    previous_hash = "GENESIS"
+    for row in rows:
+        payload = {
+            key: value
+            for key, value in row.items()
+            if key not in {"audit_event_id", "previous_hash", "event_hash", "hash_valid", "previous_hash_valid"}
+        }
+        previous_hash_valid = row["previous_hash"] == previous_hash
+        expected_hash = _audit_hash(payload, row["previous_hash"], digest_algorithm)
+        hash_valid = row["event_hash"] == expected_hash
+        verification_rows.append(
+            {
+                "audit_event_id": row["audit_event_id"],
+                "method": row["method"],
+                "round": row["round"],
+                "client_id": row["client_id"],
+                "previous_hash_valid": previous_hash_valid,
+                "hash_valid": hash_valid,
+                "expected_hash": expected_hash,
+                "event_hash": row["event_hash"],
+            }
+        )
+        previous_hash = row["event_hash"]
+    return verification_rows
+
+
+def _audit_summary_rows(method_results, audit_rows, verification_rows):
+    rows = []
+    for method_name, result in method_results.items():
+        method_audit = [row for row in audit_rows if row["method"] == method_name]
+        method_verify = [row for row in verification_rows if row["method"] == method_name]
+        regulatory_rows = result.get("regulatory_records", [])
+        rows.append(
+            {
+                "method": method_name,
+                "total_audit_events": len(method_audit),
+                "verified_audit_events": sum(1 for row in method_verify if row["hash_valid"] and row["previous_hash_valid"]),
+                "invalid_chain_links": sum(1 for row in method_verify if not row["hash_valid"] or not row["previous_hash_valid"]),
+                "avg_trace_completeness": float(np.mean([row["trace_completeness"] for row in method_audit])) if method_audit else 0.0,
+                "total_warnings": sum(1 for row in regulatory_rows if row["action"] == "warning"),
+                "total_downweighted": sum(1 for row in regulatory_rows if row["action"] == "downweight"),
+                "total_quarantined": sum(1 for row in regulatory_rows if row["action"] == "quarantine"),
+                "avg_weight_alignment_error": np.nanmean(result.get("avg_weight_alignment_errors", [])) if result.get("avg_weight_alignment_errors") else 0.0,
+                "first_event_hash": method_audit[0]["event_hash"] if method_audit else "",
+                "final_event_hash": method_audit[-1]["event_hash"] if method_audit else "",
+            }
+        )
+    return rows
+
+
+def _plot_audit_trace(audit_rows, output_dir):
+    if not audit_rows:
+        return
+    plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+    for method_name in sorted({row["method"] for row in audit_rows}):
+        method_rows = [row for row in audit_rows if row["method"] == method_name]
+        rounds = sorted({row["round"] for row in method_rows})
+        completeness = [
+            float(np.mean([row["trace_completeness"] for row in method_rows if row["round"] == round_num]))
+            for round_num in rounds
+        ]
+        plt.plot(rounds, completeness, marker="o", label=method_name)
+    plt.xlabel("Round")
+    plt.ylabel("Average Trace Completeness")
+    plt.title("Audit Trace Completeness")
+    plt.ylim(0, 1.05)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    charts.save_figure(os.path.join(output_dir, "audit_trace_timeline.png"))
+    plt.close()
 
 
 def _plot_group_metric(summary_rows, group_key, metric_key, output_path, ylabel, title):
@@ -2344,6 +2597,185 @@ def run_contribution_suite(args, output_dir):
         )
     _save_suite_summary(output_dir, method_results)
     print(f"Penalty and Shapley contribution suite artifacts saved to: {output_dir}")
+
+
+def run_audit_trace_suite(args, output_dir):
+    methods = _parse_csv_list(args.audit_methods, AUDIT_METHODS, "audit methods")
+    privacy_config = make_privacy_config(args)
+    print(f"Running audit trace suite: methods={methods}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+
+    train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    method_results = {}
+    audit_rows = []
+    for method_name in methods:
+        method_args = copy.copy(args)
+        method_args.enable_regulatory_intervention = True
+        method_args.enable_fairness_evaluation = True
+        method_args.enable_contribution_evaluation = True
+        method_output_dir = os.path.join(output_dir, method_name)
+        result = _run_single_method(
+            method_name,
+            method_args,
+            train_val_data,
+            X_test,
+            y_test,
+            classes,
+            failure_plan,
+            method_output_dir,
+            privacy_config,
+            label_suffix=" (audit trace)",
+        )
+        method_results[method_name] = result
+        audit_rows.extend(_build_audit_trace(method_name, result, args.audit_digest_algorithm))
+
+    verification_rows = _verify_audit_trace(audit_rows, args.audit_digest_algorithm)
+    summary_rows = _audit_summary_rows(method_results, audit_rows, verification_rows)
+    _write_csv(os.path.join(output_dir, "audit_trace_log.csv"), audit_rows)
+    _write_csv(os.path.join(output_dir, "audit_chain_verification.csv"), verification_rows)
+    _write_csv(os.path.join(output_dir, "audit_trace_summary.csv"), summary_rows)
+    _plot_audit_trace(audit_rows, output_dir)
+    _save_suite_summary(output_dir, method_results)
+    print(f"Audit trace suite artifacts saved to: {output_dir}")
+
+
+def _ablation_config_overrides(scenario):
+    if scenario == "no_adaptive_privacy":
+        return {"dynamic_privacy": False}
+    if scenario == "no_compute_adapter":
+        return {"compute_adapter": False}
+    if scenario == "no_zkip":
+        return {"use_zkip": False}
+    if scenario == "no_ebcd":
+        return {"use_ebcd": False}
+    if scenario == "no_tcm":
+        return {"use_tcm": False}
+    return {}
+
+
+def _ablation_args(args, scenario):
+    scenario_args = copy.copy(args)
+    scenario_args.enable_regulatory_intervention = scenario != "no_regulatory"
+    scenario_args.enable_contribution_evaluation = scenario != "no_contribution"
+    scenario_args.enable_fairness_evaluation = scenario != "no_fairness"
+    return scenario_args
+
+
+def _plot_ablation_summary(summary_rows, final_rows, output_dir):
+    if not summary_rows:
+        return
+    for metric_key, filename, ylabel, title in (
+        ("accuracy", "ablation_accuracy.png", "Accuracy", "Ablation Accuracy"),
+        ("f1_score", "ablation_macro_f1.png", "Macro-F1", "Ablation Macro-F1"),
+        ("balanced_accuracy", "ablation_balanced_accuracy.png", "Balanced Accuracy", "Ablation Balanced Accuracy"),
+    ):
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        for scenario in sorted({row["scenario"] for row in summary_rows}):
+            rows = sorted([row for row in summary_rows if row["scenario"] == scenario], key=lambda row: row["round"])
+            plt.plot([row["round"] for row in rows], [row[metric_key] for row in rows], marker="o", label=scenario)
+        plt.xlabel("Round")
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.grid(True, alpha=0.3)
+        plt.legend(fontsize=8)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, filename))
+        plt.close()
+
+    if final_rows:
+        rows = sorted(final_rows, key=lambda row: row["scenario"])
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
+        x = np.arange(len(rows))
+        plt.bar(x, [row["final_accuracy_delta_vs_full"] for row in rows])
+        plt.xticks(x, [row["scenario"] for row in rows], rotation=30, ha="right")
+        plt.ylabel("Final Accuracy Delta vs Full")
+        plt.title("Ablation Accuracy Impact")
+        plt.grid(True, axis="y", alpha=0.3)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "ablation_accuracy_delta.png"))
+        plt.close()
+
+
+def run_ablation_suite(args, output_dir):
+    scenarios = _parse_csv_list(args.ablation_scenarios, ABLATION_SCENARIOS, "ablation scenarios")
+    if "full" not in scenarios:
+        scenarios = ["full"] + scenarios
+    method_name = args.ablation_method
+    privacy_config = make_privacy_config(args)
+    print(f"Running ablation suite: method={method_name}, scenarios={scenarios}")
+    print(f"Results will be saved to: {output_dir}")
+    _print_privacy_config(privacy_config)
+
+    train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    scenario_results = {}
+    summary_rows = []
+    final_rows = []
+    full_final_accuracy = None
+
+    for scenario in scenarios:
+        scenario_args = _ablation_args(args, scenario)
+        scenario_output_dir = os.path.join(output_dir, scenario)
+        result = _run_single_method(
+            method_name,
+            scenario_args,
+            train_val_data,
+            X_test,
+            y_test,
+            classes,
+            failure_plan,
+            scenario_output_dir,
+            privacy_config,
+            label_suffix=f" ({scenario})",
+            config_overrides=_ablation_config_overrides(scenario),
+            ablation_scenario=scenario,
+        )
+        scenario_results[scenario] = result
+        if scenario == "full":
+            full_final_accuracy = result["accuracies"][-1] if result.get("accuracies") else np.nan
+        for idx, round_num in enumerate(result["rounds"]):
+            summary_rows.append(
+                {
+                    "method": method_name,
+                    "scenario": scenario,
+                    "round": round_num,
+                    "accuracy": result["accuracies"][idx],
+                    "balanced_accuracy": result["balanced_accuracies"][idx],
+                    "f1_score": result["f1_scores"][idx],
+                    "auc_roc": result["aucs"][idx],
+                    "dp_noise_scale": result["dp_noise_scales"][idx],
+                    "zkip_failures": result["zkip_failures"][idx],
+                    "ebcd_alert": result["ebcd_alerts"][idx],
+                    "tcm_state_count": result["tcm_counts"][idx],
+                    "total_regulatory_actions": (
+                        result["regulatory_warning_counts"][idx]
+                        + result["regulatory_downweight_counts"][idx]
+                        + result["regulatory_quarantine_counts"][idx]
+                    ),
+                    "client_accuracy_gap": result["client_accuracy_gaps"][idx],
+                    "avg_contribution_score": result["avg_contribution_scores"][idx],
+                }
+            )
+
+    if full_final_accuracy is None:
+        full_final_accuracy = np.nan
+    for scenario, result in scenario_results.items():
+        row = _final_metric_row(scenario, result)
+        row["method"] = method_name
+        row["scenario"] = scenario
+        row["disabled_component"] = "none" if scenario == "full" else scenario.replace("no_", "")
+        final_accuracy = row.get("final_accuracy", np.nan)
+        row["final_accuracy_delta_vs_full"] = (
+            final_accuracy - full_final_accuracy
+            if np.isfinite(_metric_value(final_accuracy)) and np.isfinite(_metric_value(full_final_accuracy))
+            else np.nan
+        )
+        final_rows.append(row)
+
+    _write_csv(os.path.join(output_dir, "ablation_summary.csv"), summary_rows)
+    _write_csv(os.path.join(output_dir, "ablation_final_metrics.csv"), final_rows)
+    _plot_ablation_summary(summary_rows, final_rows, output_dir)
+    print(f"Ablation suite artifacts saved to: {output_dir}")
 
 
 def run_synthetic_fairness_suite(args, output_dir):
