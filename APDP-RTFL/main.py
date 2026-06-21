@@ -55,7 +55,7 @@ def parse_args():
                         choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution", "audit_trace", "ablation"],
                         help="single runs APDP-RTFL; comparison suites include baselines, participation, privacy_sensitivity, pollution, fairness, synthetic_fairness, contribution, audit_trace, and ablation.")
     parser.add_argument("--methods", default="all",
-                        help="Baseline methods: all or comma-separated fedavg,fedprox,ldp_fl,global_dp,dp_rtfl,apdp_rtfl.")
+                        help="Baseline methods: all or comma-separated dp_fl,dp_flprox,dp_fedsgd,global_dp,dp_rtfl,apdp_rtfl. Legacy fedavg/fedprox/ldp_fl remain available when explicitly requested.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
                         help="FedProx proximal coefficient. Default: 0.01.")
     parser.add_argument("--backend", default="sklearn", choices=["sklearn", "torch"],

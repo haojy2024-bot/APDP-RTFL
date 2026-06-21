@@ -26,7 +26,8 @@ DP_DELTA = 1e-5
 DP_L2_NORM_CLIP = 1.0
 BASE_LEARNING_RATE = 0.01
 EARLYSTOP_PATIENCE = 3
-BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+BASELINE_METHODS = ("dp_fl", "dp_flprox", "dp_fedsgd", "global_dp", "dp_rtfl", "apdp_rtfl")
+SUPPORTED_BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl") + BASELINE_METHODS
 PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
 PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
 POLLUTION_METHODS = ("apdp_rtfl",)
@@ -85,6 +86,7 @@ def make_privacy_config(args):
 METHOD_CONFIGS = {
     "fedavg": {
         "label": "FedAvg",
+        "reference": "",
         "dp_scope": "none",
         "use_dp": False,
         "dynamic_privacy": False,
@@ -93,9 +95,11 @@ METHOD_CONFIGS = {
         "use_ebcd": False,
         "use_tcm": False,
         "fedprox": False,
+        "force_client_epochs": None,
     },
     "fedprox": {
         "label": "FedProx",
+        "reference": "Li et al., Federated optimization in heterogeneous networks, MLSys 2020.",
         "dp_scope": "none",
         "use_dp": False,
         "dynamic_privacy": False,
@@ -104,9 +108,11 @@ METHOD_CONFIGS = {
         "use_ebcd": False,
         "use_tcm": False,
         "fedprox": True,
+        "force_client_epochs": None,
     },
     "ldp_fl": {
         "label": "LDP-FL",
+        "reference": "Arachchige et al., Local differential privacy for deep learning, IEEE Internet of Things Journal 2019/2020.",
         "dp_scope": "client",
         "use_dp": True,
         "dynamic_privacy": False,
@@ -115,9 +121,50 @@ METHOD_CONFIGS = {
         "use_ebcd": False,
         "use_tcm": False,
         "fedprox": False,
+        "force_client_epochs": None,
+    },
+    "dp_fl": {
+        "label": "DP-FL",
+        "reference": "Arachchige et al., Local differential privacy for deep learning, IEEE Internet of Things Journal 2019/2020.",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": False,
+        "force_client_epochs": None,
+    },
+    "dp_flprox": {
+        "label": "DP-FLProx",
+        "reference": "Li et al., Federated optimization in heterogeneous networks, MLSys 2020.",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": True,
+        "force_client_epochs": None,
+    },
+    "dp_fedsgd": {
+        "label": "DP-FedSGD",
+        "reference": "Auddy et al., Statistical Limits and Efficient Algorithms for Differentially Private Federated Learning, arXiv:2605.18656, 2026.",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": False,
+        "force_client_epochs": 1,
     },
     "global_dp": {
         "label": "Global-DP",
+        "reference": "",
         "dp_scope": "server",
         "use_dp": False,
         "dynamic_privacy": False,
@@ -126,9 +173,11 @@ METHOD_CONFIGS = {
         "use_ebcd": False,
         "use_tcm": False,
         "fedprox": False,
+        "force_client_epochs": None,
     },
     "dp_rtfl": {
         "label": "DP-RTFL",
+        "reference": "",
         "dp_scope": "client",
         "use_dp": True,
         "dynamic_privacy": False,
@@ -137,9 +186,11 @@ METHOD_CONFIGS = {
         "use_ebcd": True,
         "use_tcm": True,
         "fedprox": False,
+        "force_client_epochs": None,
     },
     "apdp_rtfl": {
         "label": "APDP-RTFL",
+        "reference": "",
         "dp_scope": "client",
         "use_dp": True,
         "dynamic_privacy": True,
@@ -148,6 +199,7 @@ METHOD_CONFIGS = {
         "use_ebcd": True,
         "use_tcm": True,
         "fedprox": False,
+        "force_client_epochs": None,
     },
 }
 
@@ -1401,6 +1453,7 @@ def _run_single_method(
     result = {
         "method": method_name,
         "label": f"{config['label']}{label_suffix}",
+        "reference": config.get("reference", ""),
         "participation_policy": participation_policy,
         "ablation_scenario": ablation_scenario or "",
         "regulatory_enabled": (
@@ -1524,6 +1577,8 @@ def _run_single_method(
             effective_epochs = _effective_epochs(
                 idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config
             )
+            if config.get("force_client_epochs") is not None:
+                effective_epochs = int(config["force_client_epochs"])
             client.set_global_model_parameters(global_params)
             original_X, original_y, polluted_sample_indices, polluted_sample_count = None, None, None, 0
             if idx in polluted_indices and _pollution_active(args, round_num):
@@ -1755,16 +1810,42 @@ def _parse_methods(methods_arg):
     if methods_arg == "all":
         return list(BASELINE_METHODS)
     methods = [m.strip().lower() for m in methods_arg.split(",") if m.strip()]
-    invalid = [m for m in methods if m not in BASELINE_METHODS]
+    invalid = [m for m in methods if m not in SUPPORTED_BASELINE_METHODS]
     if invalid:
-        raise ValueError(f"Unsupported baseline methods: {invalid}. Supported: {BASELINE_METHODS}")
+        raise ValueError(f"Unsupported baseline methods: {invalid}. Supported: {SUPPORTED_BASELINE_METHODS}")
     return methods
+
+
+def _save_baseline_method_metadata(output_dir, method_names):
+    """Persist the exact comparison configuration used by a baseline run."""
+    rows = []
+    for method_name in method_names:
+        config = METHOD_CONFIGS[method_name]
+        rows.append(
+            {
+                "method": method_name,
+                "label": config["label"],
+                "comparison_role": "default_dp_baseline" if method_name in BASELINE_METHODS else "legacy_explicit_only",
+                "dp_scope": config["dp_scope"],
+                "use_dp": config["use_dp"],
+                "dynamic_privacy": config["dynamic_privacy"],
+                "compute_adapter": config["compute_adapter"],
+                "use_zkip": config["use_zkip"],
+                "use_ebcd": config["use_ebcd"],
+                "use_tcm": config["use_tcm"],
+                "fedprox": config["fedprox"],
+                "force_client_epochs": config["force_client_epochs"],
+                "reference": config["reference"],
+            }
+        )
+    _write_csv(os.path.join(output_dir, "baseline_method_metadata.csv"), rows)
 
 
 def _final_metric_row(method_name, result):
     row = {
         "method": method_name,
         "label": result["label"],
+        "reference": result.get("reference", ""),
         "final_accuracy": result["accuracies"][-1] if result["accuracies"] else np.nan,
         "best_accuracy": np.nanmax(result["accuracies"]) if result["accuracies"] else np.nan,
         "final_balanced_accuracy": result["balanced_accuracies"][-1] if result["balanced_accuracies"] else np.nan,
@@ -2430,6 +2511,7 @@ def run_baseline_suite(args, output_dir):
     print(f"Running baseline suite: {methods}")
     print(f"Results will be saved to: {output_dir}")
     _print_privacy_config(privacy_config)
+    _save_baseline_method_metadata(output_dir, methods)
 
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
 
