@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import time
 from datetime import datetime
@@ -10,6 +11,13 @@ from fl_client import FLClient
 from fl_server import FLServer
 import charting as charts
 from sklearn.model_selection import train_test_split
+from experiment_artifacts import (
+    export_tcm_checkpoints,
+    initialize_run_artifacts,
+    json_safe,
+    write_artifact_manifest,
+    write_data_artifacts,
+)
 
 # 新增：动态隐私预算配置
 TOTAL_PRIVACY_BUDGET = 5.0 # 总隐私预算
@@ -158,7 +166,12 @@ def create_output_dir(args):
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_root = args.output_root if os.path.isabs(args.output_root) else os.path.join(repo_root, args.output_root)
     output_dir = os.path.join(output_root, run_name)
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(output_root, exist_ok=True)
+    if os.path.exists(output_dir):
+        raise FileExistsError(
+            f"Run directory already exists: {output_dir}. Choose a new --run-name to avoid mixing experiment artifacts."
+        )
+    os.makedirs(output_dir)
     return output_dir
 
 # 隐私预算分配器
@@ -358,6 +371,7 @@ def main():
     args = parse_args()
     np.random.seed(args.seed)
     output_dir = create_output_dir(args)
+    initialize_run_artifacts(output_dir, args)
     global TOTAL_PRIVACY_BUDGET, MIN_EPSILON, MAX_EPSILON, DP_EPSILON, DP_DELTA, DP_L2_NORM_CLIP
     TOTAL_PRIVACY_BUDGET = args.total_privacy_budget
     MIN_EPSILON = args.min_epsilon
@@ -478,6 +492,13 @@ def main():
                                 X_val=X_c_val, y_val=y_c_val, earlystop_patience=EARLYSTOP_PATIENCE,
                                 classes=classes))
         client_val_sets.append((X_c_val, y_c_val))
+    main_failure_rng = np.random.default_rng(args.seed + 2026)
+    failure_plan = main_failure_rng.random((args.num_rounds, args.num_clients)) < args.failure_prob
+    train_val_data = [
+        (client.X_train, client.y_train, client.X_val, client.y_val)
+        for client in clients
+    ]
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
     # 新增：异构算力适配器
     compute_adapter = HeterogeneousComputeAdapter()
     compute_adapter.disable_epoch_scaling = args.disable_compute_epoch_scaling
@@ -576,7 +597,7 @@ def main():
         round_client_zkip_status = []
         round_client_epsilon_list = [] # 本轮每个客户端的隐私预算
         for idx, client in enumerate(clients):
-            if client.simulate_failure(probability=args.failure_prob): 
+            if failure_plan[round_num - 1][idx]:
                 round_client_update_norms.append(None)
                 round_client_ebcd_stats.append((None, None, None))
                 round_client_zkip_status.append(None)
@@ -724,6 +745,56 @@ def main():
     np.save(os.path.join(output_dir, 'per_client_ebcd_stats.npy'), np.array(per_client_ebcd_stats, dtype=object))
     np.save(os.path.join(output_dir, 'per_client_zkip_status.npy'), np.array(per_client_zkip_status, dtype=object))
     np.save(os.path.join(output_dir, 'per_client_epsilon.npy'), np.array(per_client_epsilon, dtype=object)) # 保存隐私预算分配
+    single_metric_rows = [
+        {
+            "round": rounds[idx],
+            "accuracy": accuracies[idx],
+            "f1_score": f1_scores[idx],
+            "auc_roc": aucs[idx],
+            "dp_noise_scale": dp_noise_scales[idx],
+            "agg_client_count": agg_client_counts[idx],
+            "zkip_failures": zkip_failures[idx],
+            "delta_norm": delta_norms[idx],
+            "ebcd_alert": ebcd_alerts[idx],
+            "tcm_state_count": tcm_counts[idx],
+            "ebcd_variance": ebcd_variances[idx],
+            "ebcd_kurtosis": ebcd_kurtoses[idx],
+            "ebcd_skewness": ebcd_skewnesses[idx],
+        }
+        for idx in range(len(rounds))
+    ]
+    earlystop_best_metric = (
+        server.earlystop.best_metric
+        if hasattr(server, "earlystop") and server.earlystop.best_metric != -float("inf")
+        else np.nan
+    )
+    earlystop_best_metric_series = [earlystop_best_metric for _ in rounds]
+    import csv
+    with open(os.path.join(output_dir, "metrics.csv"), "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(single_metric_rows[0].keys()) if single_metric_rows else ["round"])
+        writer.writeheader()
+        writer.writerows(single_metric_rows)
+    with open(os.path.join(output_dir, "metrics.json"), "w", encoding="utf-8") as handle:
+        json.dump(
+            json_safe({
+                "round_metrics": single_metric_rows,
+                "server_statuses": server_statuses,
+                "coordinator_ids": coordinator_ids,
+                "privacy_budget_allocations": privacy_budget_allocations,
+                "earlystop_best_metric": earlystop_best_metric_series,
+                "per_client_data_files": {
+                    "update_norms": "per_client_update_norms.npy",
+                    "ebcd_stats": "per_client_ebcd_stats.npy",
+                    "zkip_status": "per_client_zkip_status.npy",
+                    "epsilon": "per_client_epsilon.npy",
+                },
+            }),
+            handle,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    export_tcm_checkpoints(output_dir, server.tcm)
     # --- Save plots for research ---
     charts.plot_global_metrics(rounds, accuracies, f1_scores, aucs)
     charts.save_figure(os.path.join(output_dir, 'global_metrics.png'))
@@ -786,12 +857,27 @@ def main():
         data_qualities = []
         epsilon_values = []
         data_sizes = []
+        quality_rows = []
         for i, client in enumerate(clients):
             if hasattr(client, 'y_train'):
                 quality = privacy_allocator.compute_data_quality_score(client.y_train)
+                epsilon = final_allocations.get(i,0)
                 data_qualities.append(quality)
-                epsilon_values.append(final_allocations.get(i,0))
+                epsilon_values.append(epsilon)
                 data_sizes.append(len(client.y_train))
+                quality_rows.append(
+                    {
+                        "client_id": client.client_id,
+                        "data_quality_entropy": quality,
+                        "final_epsilon": epsilon,
+                        "train_samples": len(client.y_train),
+                    }
+                )
+
+        with open(os.path.join(output_dir, "client_privacy_quality_summary.csv"), "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(quality_rows[0].keys()) if quality_rows else ["client_id"])
+            writer.writeheader()
+            writer.writerows(quality_rows)
 
         plt.figure(figsize=charts.FIGSIZE_DEFAULT)
         scatter = plt.scatter(data_qualities, epsilon_values, s=[s/10 for s in data_sizes],
@@ -817,9 +903,7 @@ def main():
 
     # --- Early stopping chart for server ---
     if hasattr(server, 'earlystop') and hasattr(server.earlystop, 'best_metric'):
-        best_accs = []
-        for _ in rounds:
-            best_accs.append(server.earlystop.best_metric if server.earlystop.best_metric != -float('inf') else np.nan)
+        best_accs = earlystop_best_metric_series
         charts.plot_early_stopping_metric(rounds, best_accs, metric_name="Best Validation Accuracy", ylabel="Accuracy")
         charts.save_figure(os.path.join(output_dir, 'earlystop_server_best_val_acc.png'))
         plt.close()
@@ -870,6 +954,7 @@ def main():
         plt.close()
 
     plot_per_client_epsilon(rounds, per_client_epsilon, client_ids)
+    write_artifact_manifest(output_dir)
     print(f"Experiment artifacts saved to: {output_dir}")
 
 if __name__ == "__main__":

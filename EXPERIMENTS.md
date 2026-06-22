@@ -8,6 +8,8 @@ python APDP-RTFL/main.py <arguments>
 
 The default result location is `results/<run-name>/`. Set `--run-name` explicitly for every formal run. Use the same dataset split, client count, round count, partition, privacy-budget parameters, seed list, and backend within one comparison table or figure.
 
+Each run directory is write-once: an existing `--run-name` is rejected to prevent mixed artifacts. Every new run writes `run_config.json`, `run_command.txt`, `environment.json`, `data_artifacts/`, and `artifact_manifest.csv`. The data-artifact directory contains dataset fingerprints, client split summaries, and the generated failure plan; method directories with TCM enabled also contain `tcm_manifest.csv` and recoverable `checkpoints/*.npz` files.
+
 ## Common Formal Setting
 
 The following is a starting protocol for a formal EMNIST experiment. It intentionally uses a non-IID partition and a fixed random seed. Repeat each formal command with at least three seeds, such as `42`, `43`, and `44`, and report mean plus standard deviation.

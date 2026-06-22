@@ -16,6 +16,7 @@ from data_utils import load_experiment_data, split_data_for_clients
 from fl_client import FLClient
 from fl_server import FLServer
 import charting as charts
+from experiment_artifacts import export_tcm_checkpoints, write_artifact_manifest, write_data_artifacts
 
 
 TOTAL_PRIVACY_BUDGET = 5.0
@@ -1178,13 +1179,16 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
         writer.writeheader()
         writer.writerows(rows)
 
+    serializable_result = {key: value for key, value in result.items() if key != "tcm"}
     with open(os.path.join(output_dir, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump(_json_safe(result), f, indent=2)
+        json.dump(_json_safe(serializable_result), f, indent=2)
 
     np.save(os.path.join(output_dir, "per_client_update_norms.npy"), np.array(result["per_client_update_norms"], dtype=object))
     np.save(os.path.join(output_dir, "per_client_ebcd_stats.npy"), np.array(result["per_client_ebcd_stats"], dtype=object))
     np.save(os.path.join(output_dir, "per_client_zkip_status.npy"), np.array(result["per_client_zkip_status"], dtype=object))
     np.save(os.path.join(output_dir, "per_client_epsilon.npy"), np.array(result["per_client_epsilon"], dtype=object))
+    if result.get("tcm") is not None:
+        export_tcm_checkpoints(output_dir, result["tcm"])
 
     charts.plot_global_metrics(result["rounds"], result["accuracies"], result["f1_scores"], result["aucs"])
     charts.save_figure(os.path.join(output_dir, "global_metrics.png"))
@@ -1387,6 +1391,7 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
         plt.tight_layout()
         charts.save_figure(os.path.join(output_dir, "contribution_weight_alignment.png"))
         plt.close()
+    write_artifact_manifest(output_dir)
 
 
 def _pollution_detection_metrics(result):
@@ -1483,6 +1488,7 @@ def _run_single_method(
         "per_client_ebcd_stats": [],
         "per_client_zkip_status": [],
         "per_client_epsilon": [],
+        "tcm": server.tcm,
         "regulatory_records": [],
         "regulatory_warning_counts": [],
         "regulatory_downweight_counts": [],
@@ -2094,6 +2100,7 @@ def _save_suite_summary(output_dir, method_results):
     plt.tight_layout()
     charts.save_figure(os.path.join(output_dir, "baseline_comparison.png"))
     plt.close()
+    write_artifact_manifest(output_dir)
 
 
 def _load_suite_data(args, privacy_config):
@@ -2514,6 +2521,7 @@ def run_baseline_suite(args, output_dir):
     _save_baseline_method_metadata(output_dir, methods)
 
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
 
     method_results = {}
     for method_name in methods:
@@ -2541,6 +2549,7 @@ def run_pollution_injection_suite(args, output_dir):
     _print_privacy_config(privacy_config)
 
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
     scenario_results = {}
     final_rows = []
     summary_rows = []
@@ -2619,6 +2628,7 @@ def run_pollution_injection_suite(args, output_dir):
     plt.tight_layout()
     charts.save_figure(os.path.join(output_dir, "pollution_detection_rate.png"))
     plt.close()
+    write_artifact_manifest(output_dir)
     print(f"Pollution injection suite artifacts saved to: {output_dir}")
 
 
@@ -2630,6 +2640,7 @@ def run_fairness_suite(args, output_dir):
     _print_privacy_config(privacy_config)
 
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
     method_results = {}
     for method_name in methods:
         method_args = copy.copy(args)
@@ -2658,6 +2669,7 @@ def run_contribution_suite(args, output_dir):
     _print_privacy_config(privacy_config)
 
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
     method_results = {}
     for method_name in methods:
         method_args = copy.copy(args)
@@ -2689,6 +2701,7 @@ def run_audit_trace_suite(args, output_dir):
     _print_privacy_config(privacy_config)
 
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
     method_results = {}
     audit_rows = []
     for method_name in methods:
@@ -2790,6 +2803,7 @@ def run_ablation_suite(args, output_dir):
     _print_privacy_config(privacy_config)
 
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
     scenario_results = {}
     summary_rows = []
     final_rows = []
@@ -2857,6 +2871,7 @@ def run_ablation_suite(args, output_dir):
     _write_csv(os.path.join(output_dir, "ablation_summary.csv"), summary_rows)
     _write_csv(os.path.join(output_dir, "ablation_final_metrics.csv"), final_rows)
     _plot_ablation_summary(summary_rows, final_rows, output_dir)
+    write_artifact_manifest(output_dir)
     print(f"Ablation suite artifacts saved to: {output_dir}")
 
 
@@ -2886,6 +2901,18 @@ def run_synthetic_fairness_suite(args, output_dir):
                 f"For FEMNIST/CIFAR10/CIFAR100, generate data/{dataset_name}/all_data first with the dataset generate_data.py script. "
                 f"Original error: {exc}"
             ) from exc
+
+        write_data_artifacts(
+            output_dir,
+            data_args,
+            train_val_data,
+            X_test,
+            y_test,
+            classes,
+            failure_plan,
+            dataset_name=dataset_name,
+            metadata_rows=metadata_rows,
+        )
 
         metadata_rows_all.extend(metadata_rows)
         evaluator = GroupFairnessEvaluator(metadata_rows)
@@ -2947,6 +2974,7 @@ def run_participation_suite(args, output_dir):
     print(f"Results will be saved to: {output_dir}")
     _print_privacy_config(privacy_config)
     train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
 
     policy_results = {}
     for policy in policies:
@@ -2991,6 +3019,7 @@ def run_participation_suite(args, output_dir):
     _plot_group_metric(summary_rows, "policy", "accuracy", os.path.join(output_dir, "participation_accuracy.png"), "Accuracy", "Participation Policy Accuracy")
     _plot_group_metric(summary_rows, "policy", "selected_client_count", os.path.join(output_dir, "participation_client_count.png"), "Selected Clients", "Participation Policy Client Count")
     _plot_group_metric(summary_rows, "policy", "f1_score", os.path.join(output_dir, "participation_comparison.png"), "Macro-F1", "Participation Policy Macro-F1")
+    write_artifact_manifest(output_dir)
     print(f"Participation suite artifacts saved to: {output_dir}")
 
 
@@ -3014,6 +3043,7 @@ def run_privacy_sensitivity_suite(args, output_dir):
         args.total_privacy_budget = budget
         privacy_config = make_privacy_config(args)
         train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
+        write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
         budget_results = {}
         for method_name in methods:
             method_output_dir = os.path.join(output_dir, f"budget_{budget:g}", method_name)
@@ -3072,4 +3102,5 @@ def run_privacy_sensitivity_suite(args, output_dir):
     plt.tight_layout()
     charts.save_figure(os.path.join(output_dir, "privacy_budget_tradeoff.png"))
     plt.close()
+    write_artifact_manifest(output_dir)
     print(f"Privacy sensitivity suite artifacts saved to: {output_dir}")

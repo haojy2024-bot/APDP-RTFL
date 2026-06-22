@@ -32,6 +32,7 @@ from baselines import (
 )
 from data_utils import load_experiment_data, split_data_for_clients
 from fl_server import FLServer
+from experiment_artifacts import write_data_artifacts, write_artifact_manifest
 
 
 class TorchLinearClient:
@@ -252,6 +253,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
         "per_client_ebcd_stats": [],
         "per_client_zkip_status": [],
         "per_client_epsilon": [],
+        "tcm": server.tcm,
     }
 
     print(f"\n=== Running {config['label']} ({method_name}, torch, device={device}) ===")
@@ -420,6 +422,7 @@ def run_torch_baseline_suite(args, output_dir):
     train_val_data = _split_train_val(client_datasets, classes, args.seed)
     rng = np.random.default_rng(args.seed + 2026)
     failure_plan = rng.random((args.num_rounds, args.num_clients)) < privacy_config.failure_prob
+    write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
     method_results = {}
     for method_name in methods:
         method_output_dir = os.path.join(output_dir, method_name)
@@ -436,4 +439,5 @@ def run_torch_baseline_suite(args, output_dir):
             privacy_config,
         )
     _save_suite_summary(output_dir, method_results)
+    write_artifact_manifest(output_dir)
     print(f"Torch baseline suite artifacts saved to: {output_dir}")
