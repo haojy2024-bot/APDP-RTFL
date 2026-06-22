@@ -124,3 +124,29 @@ Main outputs: `ablation_final_metrics.csv`, `ablation_summary.csv`, `ablation_ac
 | Mechanism necessity | `ablation` | Full-versus-removed-component performance deltas |
 
 Before pooling seeds, retain each raw run directory. Aggregate only the relevant final-metric CSV files into a separate analysis table; never overwrite the raw audit or intervention logs.
+
+## 8. Multi-Seed Aggregation and Paper Tables
+
+Run each formal command once per seed, keeping a stable name pattern. For example, repeat the primary baseline command with `--run-name baseline_emnist_seed42`, `baseline_emnist_seed43`, and `baseline_emnist_seed44`.
+
+Aggregate the raw baseline directories without modifying them:
+
+```powershell
+python APDP-RTFL/aggregate_results.py --input-root results --run-pattern baseline_emnist_seed* --input-file baseline_final_metrics.csv --output-dir results/baseline_emnist_aggregate --title-prefix "EMNIST DP Baselines"
+```
+
+The aggregator creates three CSV files:
+
+| Output | Use |
+| --- | --- |
+| `experiment_seed_metrics.csv` | One method row per raw run, including the seed inferred from its directory name. Use for traceability and statistical checks. |
+| `experiment_metric_summary.csv` | Long-form `method-metric-mean-std-n` summary for plotting or supplementary material. |
+| `experiment_paper_main_table.csv` | Wide-format table with `<metric>_mean`, `<metric>_std`, and `<metric>_n` columns. Use as the source for the primary results table. |
+
+It also creates `aggregate_<metric>.png` files with mean plus sample-standard-deviation error bars. For another suite, point `--input-file` at its own final metrics file, for example `pollution_final_metrics.csv`, `ablation_final_metrics.csv`, or `privacy_sensitivity_final_metrics.csv`, and use a separate aggregate output directory.
+
+The default metrics are final accuracy, macro-F1, balanced accuracy, AUC, average round time, and average DP noise scale. Override them when a table has a narrower purpose:
+
+```powershell
+python APDP-RTFL/aggregate_results.py --input-root results --run-pattern pollution_label_flip_seed* --input-file pollution_final_metrics.csv --metrics final_accuracy,final_f1_score,detection_rate,false_positive_rate,false_negative_rate --output-dir results/pollution_label_flip_aggregate --title-prefix "Label-Flipping Detection"
+```
