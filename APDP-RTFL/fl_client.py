@@ -6,11 +6,12 @@ from zkip import ZeroKnowledgeIntegrityProofs
 from ebcd import EntropyBasedCorruptionDetection
 from earlystop import EarlyStopping
 from sklearn.metrics import accuracy_score, log_loss
+from privacy_accounting import RDPAccountant
 
 class FLClient:
     def __init__(self, client_id, X_train, y_train, num_features, learning_rate=0.01,
                  dp_epsilon=1.0, dp_delta=1e-5, dp_l2_norm_clip=1.0, random_state=None,
-                 X_val=None, y_val=None, earlystop_patience=3, classes=None):
+                 X_val=None, y_val=None, earlystop_patience=3, classes=None, dp_batch_size=256):
         self.client_id = client_id
         self.X_train = X_train
         self.y_train = y_train
@@ -20,6 +21,7 @@ class FLClient:
         self.n_classes = len(self.classes)
         self.param_classes = 1 if self.n_classes <= 2 else self.n_classes
         self.model = SGDClassifier(loss='log_loss', learning_rate='constant', eta0=learning_rate, random_state=random_state, warm_start=True)
+        self.random_state = random_state
         self.num_features = num_features
         if self.X_train.shape[0] > 0 and self.X_train.shape[1] > 0 :
             self.model.coef_ = np.zeros((self.param_classes, num_features))
@@ -32,6 +34,7 @@ class FLClient:
         self.dp_epsilon = dp_epsilon
         self.dp_delta = dp_delta
         self.dp_l2_norm_clip = dp_l2_norm_clip
+        self.dp_batch_size = int(dp_batch_size)
         self.X_val = X_val
         self.y_val = y_val
         self.earlystop_patience = earlystop_patience
@@ -40,6 +43,7 @@ class FLClient:
         self.last_val_loss_before = None
         self.last_val_acc_gain = 0.0
         self.last_val_loss_drop = 0.0
+        self.last_privacy_event = None
 
     def set_global_model_parameters(self, global_params):
         current_params = {}
@@ -75,7 +79,62 @@ class FLClient:
             noisy_delta_params[key] = clipped_delta + noise
         return noisy_delta_params
 
-    def train(self, epochs, use_dp=True, fedprox_mu=0.0, global_params=None):
+    def _train_with_dp_sgd(self, epochs, global_params, fedprox_mu, accountant, noise_multiplier, round_num):
+        """Run client-local, sample-level DP-SGD for the multiclass linear head."""
+        if self.n_classes <= 2:
+            raise ValueError("DP-SGD currently requires a multiclass linear head")
+        n_samples = len(self.y_train)
+        batch_size = min(max(1, self.dp_batch_size), n_samples)
+        sample_rate = batch_size / n_samples
+        steps = int(epochs) * int(np.ceil(n_samples / batch_size))
+        if accountant is not None:
+            event = accountant.spend(round_num or 0, steps, sample_rate, noise_multiplier)
+            self.last_privacy_event = event
+            if event.status != "spent":
+                return None, None
+
+        weights = np.copy(global_params['coef_'])
+        bias = np.copy(global_params['intercept_'])
+        class_to_index = {int(label): idx for idx, label in enumerate(self.classes)}
+        targets = np.asarray([class_to_index[int(label)] for label in self.y_train], dtype=int)
+        rng = np.random.default_rng((self.random_state or 0) + 10007 * int(round_num or 1))
+        noise_stddev = noise_multiplier * self.dp_l2_norm_clip
+        for _ in range(int(epochs)):
+            for _ in range(int(np.ceil(n_samples / batch_size))):
+                selected = rng.random(n_samples) < sample_rate
+                if not np.any(selected):
+                    selected[rng.integers(0, n_samples)] = True
+                X_batch, y_batch = self.X_train[selected], targets[selected]
+                logits = X_batch @ weights.T + bias
+                logits -= np.max(logits, axis=1, keepdims=True)
+                probabilities = np.exp(logits)
+                probabilities /= probabilities.sum(axis=1, keepdims=True)
+                residual = probabilities
+                residual[np.arange(len(y_batch)), y_batch] -= 1.0
+                grad_w_each = residual[:, :, None] * X_batch[:, None, :]
+                grad_b_each = residual
+                norms = np.sqrt(np.sum(grad_w_each**2, axis=(1, 2)) + np.sum(grad_b_each**2, axis=1))
+                scales = np.minimum(1.0, self.dp_l2_norm_clip / (norms + 1e-12))
+                grad_w = np.mean(grad_w_each * scales[:, None, None], axis=0)
+                grad_b = np.mean(grad_b_each * scales[:, None], axis=0)
+                denominator = max(1, len(y_batch))
+                grad_w += rng.normal(0.0, noise_stddev / denominator, size=grad_w.shape)
+                grad_b += rng.normal(0.0, noise_stddev / denominator, size=grad_b.shape)
+                if fedprox_mu > 0:
+                    grad_w += fedprox_mu * (weights - global_params['coef_'])
+                    grad_b += fedprox_mu * (bias - global_params['intercept_'])
+                weights -= self.model.eta0 * grad_w
+                bias -= self.model.eta0 * grad_b
+        self.model.coef_ = weights
+        self.model.intercept_ = bias
+        self.dss.set_base_model_parameters(global_params)
+        delta_params = self.dss.compute_delta({'coef_': weights, 'intercept_': bias})
+        proof = self.zkip.generate_proof(delta_params)
+        return delta_params, proof
+
+    def train(self, epochs, use_dp=True, fedprox_mu=0.0, global_params=None,
+              privacy_accountant: RDPAccountant | None = None, noise_multiplier: float | None = None,
+              round_num: int | None = None):
         #记录before
         if self.X_val is not None and self.y_val is not None and len(np.unique(self.y_val)) > 0 :
             # 记录训练前的验证指标
@@ -89,6 +148,8 @@ class FLClient:
             return None, None 
         if not hasattr(self.model, 'classes_') and len(self.y_train) > 0:
             self.model.partial_fit(self.X_train[:1], self.y_train[:1], classes=self.classes)
+        if use_dp and noise_multiplier is not None:
+            return self._train_with_dp_sgd(epochs, global_params, fedprox_mu, privacy_accountant, noise_multiplier, round_num)
         earlystop = EarlyStopping(mode='min', patience=self.earlystop_patience)
         for epoch in range(epochs):
             self.model.partial_fit(self.X_train, self.y_train)
@@ -98,8 +159,8 @@ class FLClient:
             # Early stopping: check validation loss if validation data is provided
             if self.X_val is not None and self.y_val is not None and len(np.unique(self.y_val)) >= 2:
                 try:
-                    val_pred = self.model.predict_proba(self.X_val)[:, 1]
-                    val_loss = -np.mean(self.y_val * np.log(val_pred + 1e-8) + (1 - self.y_val) * np.log(1 - val_pred + 1e-8))
+                    val_pred = self.model.predict_proba(self.X_val)
+                    val_loss = log_loss(self.y_val, val_pred, labels=self.classes)
                 except Exception:
                     val_loss = float('inf')
                 if earlystop.step(val_loss, {'coef_': np.copy(self.model.coef_), 'intercept_': np.copy(self.model.intercept_)}):

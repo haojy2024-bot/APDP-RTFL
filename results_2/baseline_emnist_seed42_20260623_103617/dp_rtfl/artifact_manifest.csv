@@ -1,0 +1,66 @@
+relative_path,artifact_type,source_files,description
+agg_client_counts.png,chart,metrics.csv,Chart source mapping
+delta_norm.png,chart,metrics.json,Chart source mapping
+dp_noise_scale.png,chart,metrics.csv,Chart source mapping
+ebcd_alerts.png,chart,metrics.csv,Chart source mapping
+global_metrics.png,chart,metrics.csv;metrics.json,Chart source mapping
+metrics.csv,data,,Experiment artifact
+metrics.json,data,,Experiment artifact
+per_client_ebcd_stats.npy,data,,Experiment artifact
+per_client_epsilon.npy,data,,Experiment artifact
+per_client_update_norms.npy,data,,Experiment artifact
+per_client_update_norms.png,chart,per_client_update_norms.npy,Chart source mapping
+per_client_zkip_status.npy,data,,Experiment artifact
+tcm_manifest.csv,data,,Experiment artifact
+tcm_state_count.png,chart,metrics.csv;tcm_manifest.csv,Chart source mapping
+zkip_failures.png,chart,metrics.csv,Chart source mapping
+checkpoints/model_02055c976de6f83b.npz,data,,Experiment artifact
+checkpoints/model_08cfea464f24061c.npz,data,,Experiment artifact
+checkpoints/model_09bf6d09fe66b662.npz,data,,Experiment artifact
+checkpoints/model_186554b3220a0e8d.npz,data,,Experiment artifact
+checkpoints/model_2084be2fd31b49d3.npz,data,,Experiment artifact
+checkpoints/model_25d373734855ceae.npz,data,,Experiment artifact
+checkpoints/model_26a1881bf6ee3093.npz,data,,Experiment artifact
+checkpoints/model_2dc660cf26fd002d.npz,data,,Experiment artifact
+checkpoints/model_2ec467f7299709c9.npz,data,,Experiment artifact
+checkpoints/model_302a15def8d507c8.npz,data,,Experiment artifact
+checkpoints/model_3c55ff13340e0039.npz,data,,Experiment artifact
+checkpoints/model_443f512032e52fbb.npz,data,,Experiment artifact
+checkpoints/model_493742687bf66723.npz,data,,Experiment artifact
+checkpoints/model_4d6b4c9fb67ba9d2.npz,data,,Experiment artifact
+checkpoints/model_4f3588d8226b4eb1.npz,data,,Experiment artifact
+checkpoints/model_53191a8968f080be.npz,data,,Experiment artifact
+checkpoints/model_59ee4f5538ccedd8.npz,data,,Experiment artifact
+checkpoints/model_5b8a5f768848b268.npz,data,,Experiment artifact
+checkpoints/model_5d6422b01176abda.npz,data,,Experiment artifact
+checkpoints/model_62b8c9ba0e5f6a5f.npz,data,,Experiment artifact
+checkpoints/model_6924cac75cfb7b91.npz,data,,Experiment artifact
+checkpoints/model_6d21155ce7826c15.npz,data,,Experiment artifact
+checkpoints/model_6e8577b5284d5b30.npz,data,,Experiment artifact
+checkpoints/model_7e1266bb0d51749f.npz,data,,Experiment artifact
+checkpoints/model_7e3e2e4f2491f0d8.npz,data,,Experiment artifact
+checkpoints/model_7f7369b5d1e5cf72.npz,data,,Experiment artifact
+checkpoints/model_805ba6e4f22ae264.npz,data,,Experiment artifact
+checkpoints/model_80b3016847fa89f5.npz,data,,Experiment artifact
+checkpoints/model_814b6f62ea0bbfb1.npz,data,,Experiment artifact
+checkpoints/model_835676515a61e771.npz,data,,Experiment artifact
+checkpoints/model_8ca3a5bd0aaa377c.npz,data,,Experiment artifact
+checkpoints/model_9745c01e06d09647.npz,data,,Experiment artifact
+checkpoints/model_9855d734e8233e0c.npz,data,,Experiment artifact
+checkpoints/model_98a277fb3e969174.npz,data,,Experiment artifact
+checkpoints/model_99f26dfd87250383.npz,data,,Experiment artifact
+checkpoints/model_a809cb795d6a4730.npz,data,,Experiment artifact
+checkpoints/model_acd90414e8add03a.npz,data,,Experiment artifact
+checkpoints/model_aea5753e75831595.npz,data,,Experiment artifact
+checkpoints/model_b3f07c2d6d7058b2.npz,data,,Experiment artifact
+checkpoints/model_bf708e1d2c963b44.npz,data,,Experiment artifact
+checkpoints/model_c1ec3ca410642404.npz,data,,Experiment artifact
+checkpoints/model_c3a523e6327bb3c6.npz,data,,Experiment artifact
+checkpoints/model_c4e79fab25b17fc3.npz,data,,Experiment artifact
+checkpoints/model_c50b64bf35530425.npz,data,,Experiment artifact
+checkpoints/model_c83070937cae8393.npz,data,,Experiment artifact
+checkpoints/model_ccc2218513107158.npz,data,,Experiment artifact
+checkpoints/model_d6c7f6d7ce0e9f75.npz,data,,Experiment artifact
+checkpoints/model_e5e5f9d041bee89b.npz,data,,Experiment artifact
+checkpoints/model_f1595ee7033aed23.npz,data,,Experiment artifact
+checkpoints/model_f5bc1e249fa45e3e.npz,data,,Experiment artifact

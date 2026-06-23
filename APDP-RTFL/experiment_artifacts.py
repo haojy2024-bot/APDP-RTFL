@@ -210,6 +210,7 @@ _CHART_SOURCES = {
     "per_client_ebcd_skewness.png": ("per_client_ebcd_stats.npy",),
     "per_client_zkip_status.png": ("per_client_zkip_status.npy",),
     "per_client_epsilon_dynamic_dp.png": ("per_client_epsilon.npy",),
+    "per_client_cumulative_epsilon.png": ("per_client_epsilon.npy", "privacy_accounting.csv"),
     "ebcd_stats.png": ("metrics.csv",),
     "server_status.png": ("metrics.json",),
     "privacy_budget_allocation.png": ("metrics.json",),

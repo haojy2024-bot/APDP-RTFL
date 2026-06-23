@@ -58,12 +58,12 @@ def parse_args():
     parser.add_argument("--output-root", default="results",
                         help="实验结果根目录。默认保存到 results。")
     parser.add_argument("--run-name", default=None,
-                        help="本次实验目录名。默认自动使用 数据集_YYYYmmdd_HHMMSS。")
+                        help="实验名称前缀；实际结果目录会自动追加 _YYYYmmdd_HHMMSS 时间戳。")
     parser.add_argument("--experiment-suite", default="single",
                         choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution", "audit_trace", "ablation"],
                         help="single runs APDP-RTFL; comparison suites include baselines, participation, privacy_sensitivity, pollution, fairness, synthetic_fairness, contribution, audit_trace, and ablation.")
     parser.add_argument("--methods", default="all",
-                        help="Baseline methods: all or comma-separated dp_fl,dp_flprox,dp_fedsgd,global_dp,dp_rtfl,apdp_rtfl. Legacy fedavg/fedprox/ldp_fl remain available when explicitly requested.")
+                        help="Baseline methods: all or comma-separated dp_fl,dp_flprox,dp_fedsgd,dp_rtfl,apdp_rtfl. Global-DP remains available only when explicitly requested.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
                         help="FedProx proximal coefficient. Default: 0.01.")
     parser.add_argument("--backend", default="sklearn", choices=["sklearn", "torch"],
@@ -73,7 +73,11 @@ def parse_args():
     parser.add_argument("--torch-batch-size", type=int, default=256,
                         help="Mini-batch size for the torch backend.")
     parser.add_argument("--total-privacy-budget", type=float, default=TOTAL_PRIVACY_BUDGET,
-                        help="Total privacy budget allocated across active clients.")
+                        help="Deprecated compatibility alias for --epsilon-per-client-total in client-DP runs.")
+    parser.add_argument("--epsilon-per-client-total", type=float, default=None,
+                        help="Total (epsilon, delta) budget for each client's entire DP-SGD training trace. Default: --total-privacy-budget.")
+    parser.add_argument("--dp-batch-size", type=int, default=256,
+                        help="Expected Poisson mini-batch size for client-side DP-SGD.")
     parser.add_argument("--min-epsilon", type=float, default=MIN_EPSILON,
                         help="Minimum per-client epsilon after adaptive adjustment.")
     parser.add_argument("--max-epsilon", type=float, default=MAX_EPSILON,
@@ -100,7 +104,7 @@ def parse_args():
                         help="Participation policies: all,random,apdp_score.")
     parser.add_argument("--privacy-budgets", default="20,50,80,100",
                         help="Comma-separated total privacy budgets for privacy sensitivity experiments.")
-    parser.add_argument("--privacy-sensitivity-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
+    parser.add_argument("--privacy-sensitivity-methods", default="dp_fl,dp_flprox,dp_fedsgd,dp_rtfl,apdp_rtfl",
                         help="Methods for privacy sensitivity experiments.")
     parser.add_argument("--enable-fairness-evaluation", action="store_true",
                         help="Enable client-level fairness evaluation in sklearn experiment suites.")
@@ -162,16 +166,19 @@ def parse_args():
 
 
 def create_output_dir(args):
-    run_name = args.run_name or f"{args.dataset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_prefix = args.run_name or args.dataset
+    run_name = f"{run_prefix}_{timestamp}"
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_root = args.output_root if os.path.isabs(args.output_root) else os.path.join(repo_root, args.output_root)
     output_dir = os.path.join(output_root, run_name)
     os.makedirs(output_root, exist_ok=True)
     if os.path.exists(output_dir):
         raise FileExistsError(
-            f"Run directory already exists: {output_dir}. Choose a new --run-name to avoid mixing experiment artifacts."
+            f"Run directory already exists: {output_dir}. Retry after one second or choose a different --run-name prefix."
         )
     os.makedirs(output_dir)
+    args.run_name = run_name
     return output_dir
 
 # 隐私预算分配器
@@ -369,6 +376,11 @@ class HeterogeneousComputeAdapter:
 
 def main():
     args = parse_args()
+    if args.epsilon_per_client_total is None:
+        args.epsilon_per_client_total = args.total_privacy_budget
+        print("Deprecation notice: --total-privacy-budget is interpreted as the per-client total DP budget; use --epsilon-per-client-total explicitly.")
+    if args.epsilon_per_client_total <= 0 or args.dp_batch_size <= 0:
+        raise ValueError("--epsilon-per-client-total and --dp-batch-size must be positive")
     np.random.seed(args.seed)
     output_dir = create_output_dir(args)
     initialize_run_artifacts(output_dir, args)
@@ -379,6 +391,13 @@ def main():
     DP_EPSILON = args.dp_epsilon
     DP_DELTA = args.dp_delta
     DP_L2_NORM_CLIP = args.dp_l2_norm_clip
+    # The historical single-run loop used update-level coordinate noise. Route
+    # sklearn single APDP runs through the maintained sample-level DP-SGD suite.
+    if args.experiment_suite == "single" and args.backend == "sklearn":
+        from baselines import run_baseline_suite
+        args.methods = "apdp_rtfl"
+        run_baseline_suite(args, output_dir)
+        return
     if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution", "audit_trace", "ablation"}:
         if args.backend == "torch":
             from torch_baselines import run_torch_baseline_suite

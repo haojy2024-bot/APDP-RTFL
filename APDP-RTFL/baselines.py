@@ -17,6 +17,7 @@ from fl_client import FLClient
 from fl_server import FLServer
 import charting as charts
 from experiment_artifacts import export_tcm_checkpoints, write_artifact_manifest, write_data_artifacts
+from privacy_accounting import RDPAccountant, calibrate_noise_multiplier
 
 
 TOTAL_PRIVACY_BUDGET = 5.0
@@ -27,7 +28,7 @@ DP_DELTA = 1e-5
 DP_L2_NORM_CLIP = 1.0
 BASE_LEARNING_RATE = 0.01
 EARLYSTOP_PATIENCE = 3
-BASELINE_METHODS = ("dp_fl", "dp_flprox", "dp_fedsgd", "global_dp", "dp_rtfl", "apdp_rtfl")
+BASELINE_METHODS = ("dp_fl", "dp_flprox", "dp_fedsgd", "dp_rtfl", "apdp_rtfl")
 SUPPORTED_BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl") + BASELINE_METHODS
 PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
 PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
@@ -54,7 +55,8 @@ class PrivacyRuntimeConfig:
                  max_epsilon=MAX_EPSILON, dp_epsilon=DP_EPSILON, dp_delta=DP_DELTA,
                  dp_l2_norm_clip=DP_L2_NORM_CLIP, failure_prob=0.15,
                  apdp_warmup_rounds=20, adaptive_increase_factor=1.10,
-                 adaptive_decrease_factor=0.90, disable_compute_epoch_scaling=False):
+                 adaptive_decrease_factor=0.90, disable_compute_epoch_scaling=False,
+                 epsilon_per_client_total=5.0, dp_batch_size=256):
         self.total_budget = total_budget
         self.min_epsilon = min_epsilon
         self.max_epsilon = max_epsilon
@@ -66,9 +68,17 @@ class PrivacyRuntimeConfig:
         self.adaptive_increase_factor = adaptive_increase_factor
         self.adaptive_decrease_factor = adaptive_decrease_factor
         self.disable_compute_epoch_scaling = disable_compute_epoch_scaling
+        self.epsilon_per_client_total = float(epsilon_per_client_total)
+        self.dp_batch_size = int(dp_batch_size)
+        self.budget_semantics = "per_client_total"
 
 
 def make_privacy_config(args):
+    epsilon_per_client_total = (
+        args.epsilon_per_client_total
+        if getattr(args, "epsilon_per_client_total", None) is not None
+        else args.total_privacy_budget
+    )
     return PrivacyRuntimeConfig(
         total_budget=args.total_privacy_budget,
         min_epsilon=args.min_epsilon,
@@ -81,6 +91,8 @@ def make_privacy_config(args):
         adaptive_increase_factor=args.adaptive_increase_factor,
         adaptive_decrease_factor=args.adaptive_decrease_factor,
         disable_compute_epoch_scaling=args.disable_compute_epoch_scaling,
+        epsilon_per_client_total=epsilon_per_client_total,
+        dp_batch_size=args.dp_batch_size,
     )
 
 
@@ -481,57 +493,47 @@ def _adjust_epsilon_for_compute(base_epsilon, client_idx, capabilities, enabled,
 
 
 def _allocate_budget(clients, active_indices, capabilities, dynamic, privacy_config):
-    if not active_indices:
-        return {}
-    if not dynamic:
-        epsilon = privacy_config.total_budget / len(active_indices)
-        return {idx: epsilon for idx in active_indices}
-
-    total_data = sum(len(clients[i].y_train) for i in active_indices)
-    if total_data == 0:
-        epsilon = privacy_config.total_budget / len(active_indices)
-        return {idx: epsilon for idx in active_indices}
-
-    compute_factors = {i: 1.0 / (capabilities.get(i, 1.0) + 0.01) for i in active_indices}
-    total_compute = sum(compute_factors.values())
-    weights = {}
-    total_weight = 0.0
-    for i in active_indices:
-        data_weight = len(clients[i].y_train) / total_data
-        quality = _compute_data_quality_score(clients[i].y_train)
-        compute_weight = compute_factors[i] / total_compute if total_compute > 0 else 0.0
-        weight = 0.50 * data_weight + 0.25 * quality + 0.25 * compute_weight
-        weights[i] = weight
-        total_weight += weight
-    if total_weight == 0:
-        epsilon = privacy_config.total_budget / len(active_indices)
-        return {idx: epsilon for idx in active_indices}
-    return {idx: (weights[idx] / total_weight) * privacy_config.total_budget for idx in active_indices}
+    # Kept for legacy visualisations only. Client-DP budgets are independent,
+    # never divided between clients, and enforced by per-client RDP ledgers.
+    return {idx: privacy_config.epsilon_per_client_total for idx in active_indices}
 
 
 def _adaptive_adjust(clients, previous_allocations, round_num, privacy_config):
-    if round_num <= privacy_config.apdp_warmup_rounds:
-        return previous_allocations.copy()
-    scores = {}
-    for i, epsilon in previous_allocations.items():
-        data_size = len(clients[i].y_train) if hasattr(clients[i], "y_train") else 0
-        data_quality = _compute_data_quality_score(clients[i].y_train) if hasattr(clients[i], "y_train") else 0.5
-        scores[i] = data_size * data_quality
-    global_avg = np.mean(list(scores.values())) if scores else 0.0
-    adjusted = previous_allocations.copy()
-    for i, epsilon in previous_allocations.items():
-        if scores.get(i, 0.0) > global_avg * 1.05:
-            adjusted[i] = min(privacy_config.max_epsilon, epsilon * privacy_config.adaptive_increase_factor)
-        else:
-            adjusted[i] = max(privacy_config.min_epsilon, epsilon * privacy_config.adaptive_decrease_factor)
-    total = sum(adjusted.values())
-    if total > 0:
-        scale = privacy_config.total_budget / total
-        adjusted = {
-            i: max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, eps * scale))
-            for i, eps in adjusted.items()
+    return previous_allocations.copy()
+
+
+def _make_client_privacy_state(clients, args, privacy_config, config):
+    state = {}
+    for idx, client in enumerate(clients):
+        n_samples = max(1, len(client.y_train))
+        batch_size = min(privacy_config.dp_batch_size, n_samples)
+        sample_rate = batch_size / n_samples
+        epochs = int(config.get("force_client_epochs") or args.client_epochs)
+        planned_steps = args.num_rounds * epochs * int(np.ceil(n_samples / batch_size))
+        base_sigma = calibrate_noise_multiplier(
+            sample_rate, planned_steps, privacy_config.epsilon_per_client_total, privacy_config.dp_delta
+        )
+        # APDP may lower noise by the configured increase factor after warmup;
+        # reserve that possible spend up front so it cannot overshoot the ledger.
+        if config.get("dynamic_privacy"):
+            base_sigma *= privacy_config.adaptive_increase_factor
+        state[idx] = {
+            "accountant": RDPAccountant(privacy_config.epsilon_per_client_total, privacy_config.dp_delta),
+            "base_noise_multiplier": base_sigma,
+            "sample_rate": sample_rate,
         }
-    return adjusted
+    return state
+
+
+def _apdp_noise_multiplier(idx, capabilities, participation_counts, state, privacy_config, round_num):
+    base = state["base_noise_multiplier"]
+    if round_num <= privacy_config.apdp_warmup_rounds:
+        return base
+    median_capability = float(np.median(list(capabilities.values()))) if capabilities else 1.0
+    median_participation = float(np.median(participation_counts)) if participation_counts else 0.0
+    rewarded = capabilities.get(idx, 1.0) >= median_capability or participation_counts[idx] <= median_participation
+    factor = privacy_config.adaptive_increase_factor if rewarded else privacy_config.adaptive_decrease_factor
+    return base / factor
 
 
 def _split_train_val(client_datasets, classes, seed):
@@ -577,6 +579,7 @@ def _init_clients(train_val_data, num_features, classes, seed, privacy_config):
                 y_val=y_val,
                 earlystop_patience=EARLYSTOP_PATIENCE,
                 classes=classes,
+                dp_batch_size=privacy_config.dp_batch_size,
             )
         )
     return clients
@@ -1187,6 +1190,37 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
     np.save(os.path.join(output_dir, "per_client_ebcd_stats.npy"), np.array(result["per_client_ebcd_stats"], dtype=object))
     np.save(os.path.join(output_dir, "per_client_zkip_status.npy"), np.array(result["per_client_zkip_status"], dtype=object))
     np.save(os.path.join(output_dir, "per_client_epsilon.npy"), np.array(result["per_client_epsilon"], dtype=object))
+    np.save(os.path.join(output_dir, "per_client_noise_multiplier.npy"), np.array(result.get("per_client_noise_multiplier", []), dtype=object))
+    privacy_rows = result.get("privacy_accounting_records", [])
+    if privacy_rows:
+        _write_csv(os.path.join(output_dir, "privacy_accounting.csv"), privacy_rows)
+        summaries = []
+        for client_id in sorted({row["client_id"] for row in privacy_rows}):
+            rows_for_client = [row for row in privacy_rows if row["client_id"] == client_id]
+            latest = rows_for_client[-1]
+            summaries.append({
+                "method": method_name,
+                "client_id": client_id,
+                "target_epsilon": latest["target_epsilon"],
+                "final_epsilon": latest["cumulative_epsilon"],
+                "remaining_epsilon": latest["remaining_epsilon"],
+                "spent_events": sum(row["status"] == "spent" for row in rows_for_client),
+                "budget_exhausted_events": sum(row["status"] == "budget_exhausted" for row in rows_for_client),
+            })
+        _write_csv(os.path.join(output_dir, "privacy_accounting_summary.csv"), summaries)
+        plt.figure(figsize=charts.FIGSIZE_WIDE)
+        epsilon_history = np.asarray(result["per_client_epsilon"], dtype=object)
+        for client_idx, client_id in enumerate(client_ids):
+            values = [row[client_idx] if client_idx < len(row) else np.nan for row in epsilon_history]
+            plt.plot(result["rounds"], values, label=client_id, linewidth=1)
+        plt.axhline(summaries[0]["target_epsilon"], color="black", linestyle="--", label="target epsilon")
+        plt.xlabel("Round")
+        plt.ylabel("Cumulative epsilon")
+        plt.title("Per-client RDP privacy spending")
+        plt.legend(ncol=2, fontsize=8)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "per_client_cumulative_epsilon.png"))
+        plt.close()
     if result.get("tcm") is not None:
         export_tcm_checkpoints(output_dir, result["tcm"])
 
@@ -1453,6 +1487,7 @@ def _run_single_method(
 
     active_indices = list(range(len(clients)))
     current_allocations = _allocate_budget(clients, active_indices, capabilities, config["dynamic_privacy"], privacy_config)
+    client_privacy_state = _make_client_privacy_state(clients, args, privacy_config, config) if config["dp_scope"] == "client" else {}
     contribution_history = []
 
     result = {
@@ -1488,6 +1523,8 @@ def _run_single_method(
         "per_client_ebcd_stats": [],
         "per_client_zkip_status": [],
         "per_client_epsilon": [],
+        "per_client_noise_multiplier": [],
+        "privacy_accounting_records": [],
         "tcm": server.tcm,
         "regulatory_records": [],
         "regulatory_warning_counts": [],
@@ -1540,15 +1577,13 @@ def _run_single_method(
     participation_counts = [0 for _ in clients]
     for round_num in range(1, args.num_rounds + 1):
         start_time = time.time()
-        if config["dynamic_privacy"] and round_num > 1:
-            current_allocations = _adaptive_adjust(clients, current_allocations, round_num, privacy_config)
-
         global_params = {k: np.copy(v) for k, v in server.global_model_parameters.items()}
         client_updates = []
         round_update_norms = []
         round_ebcd_stats = []
         round_zkip_status = []
         round_epsilons = []
+        round_noise_multipliers = []
         round_noise_scales = []
         round_delta_norm = 0.0
         available_indices = [idx for idx in range(len(clients)) if not failure_plan[round_num - 1][idx]]
@@ -1571,20 +1606,24 @@ def _run_single_method(
                 round_update_norms.append(None)
                 round_ebcd_stats.append((None, None, None))
                 round_zkip_status.append(None)
-                round_epsilons.append(None)
+                round_epsilons.append(client_privacy_state[idx]["accountant"].epsilon if idx in client_privacy_state else None)
+                round_noise_multipliers.append(None)
                 continue
 
-            base_epsilon = current_allocations.get(idx, privacy_config.dp_epsilon)
-            effective_epsilon = _adjust_epsilon_for_compute(
-                base_epsilon, idx, capabilities, config["compute_adapter"], privacy_config
-            )
-            client.dp_epsilon = max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, effective_epsilon))
-            round_epsilons.append(client.dp_epsilon)
             effective_epochs = _effective_epochs(
                 idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config
             )
             if config.get("force_client_epochs") is not None:
                 effective_epochs = int(config["force_client_epochs"])
+            privacy_state = client_privacy_state.get(idx)
+            noise_multiplier = None
+            if privacy_state is not None:
+                noise_multiplier = (
+                    _apdp_noise_multiplier(idx, capabilities, participation_counts, privacy_state, privacy_config, round_num)
+                    if config["dynamic_privacy"]
+                    else privacy_state["base_noise_multiplier"]
+                )
+            round_noise_multipliers.append(noise_multiplier)
             client.set_global_model_parameters(global_params)
             original_X, original_y, polluted_sample_indices, polluted_sample_count = None, None, None, 0
             if idx in polluted_indices and _pollution_active(args, round_num):
@@ -1609,9 +1648,23 @@ def _run_single_method(
                     use_dp=config["dp_scope"] == "client",
                     fedprox_mu=args.fedprox_mu if config["fedprox"] else 0.0,
                     global_params=global_params,
+                    privacy_accountant=privacy_state["accountant"] if privacy_state is not None else None,
+                    noise_multiplier=noise_multiplier,
+                    round_num=round_num,
                 )
             finally:
                 _restore_client_data(client, original_X, original_y)
+            if privacy_state is not None and client.last_privacy_event is not None:
+                event = client.last_privacy_event
+                result["privacy_accounting_records"].append({
+                    "method": method_name, "client_id": client.client_id, "round": round_num,
+                    "steps": event.steps, "sample_rate": event.sample_rate,
+                    "noise_multiplier": event.noise_multiplier, "cumulative_epsilon": event.epsilon,
+                    "incremental_epsilon": event.incremental_epsilon,
+                    "target_epsilon": privacy_config.epsilon_per_client_total,
+                    "remaining_epsilon": privacy_state["accountant"].remaining_epsilon, "status": event.status,
+                })
+            round_epsilons.append(privacy_state["accountant"].epsilon if privacy_state is not None else None)
             if delta is None:
                 round_update_norms.append(None)
                 round_ebcd_stats.append((None, None, None))
@@ -1629,8 +1682,8 @@ def _run_single_method(
             zkip_ok = server.zkip.verify_proof(delta, proof) if config["use_zkip"] else True
             round_zkip_status.append(zkip_ok)
             client_updates.append((delta, proof, client.client_id, len(client.y_train)))
-            if config["dp_scope"] == "client" and client.dp_epsilon > 0:
-                noise_stddev = (client.dp_l2_norm_clip * np.sqrt(2 * np.log(1.25 / client.dp_delta))) / client.dp_epsilon
+            if noise_multiplier is not None:
+                noise_stddev = noise_multiplier * client.dp_l2_norm_clip / max(1, min(privacy_config.dp_batch_size, len(client.y_train)))
             else:
                 noise_stddev = 0.0
             round_noise_scales.append(noise_stddev)
@@ -1707,6 +1760,7 @@ def _run_single_method(
         result["per_client_ebcd_stats"].append(round_ebcd_stats)
         result["per_client_zkip_status"].append(round_zkip_status)
         result["per_client_epsilon"].append(round_epsilons)
+        result["per_client_noise_multiplier"].append(round_noise_multipliers)
         fairness_records = []
         if result["fairness_enabled"]:
             fairness_records, fairness_summary = _client_fairness_records(
@@ -2500,7 +2554,9 @@ def _plot_final_metric_by_method(final_rows, metric_key, output_path, ylabel, ti
 def _print_privacy_config(privacy_config):
     print(
         "Privacy config: "
-        f"total_budget={privacy_config.total_budget}, "
+        f"per_client_total_epsilon={privacy_config.epsilon_per_client_total}, "
+        f"budget_semantics={privacy_config.budget_semantics}, "
+        f"dp_batch_size={privacy_config.dp_batch_size}, "
         f"min_epsilon={privacy_config.min_epsilon}, "
         f"max_epsilon={privacy_config.max_epsilon}, "
         f"dp_l2_norm_clip={privacy_config.dp_l2_norm_clip}, "
@@ -3040,7 +3096,9 @@ def run_privacy_sensitivity_suite(args, output_dir):
     final_rows = []
     for budget in budgets:
         original_budget = args.total_privacy_budget
+        original_per_client_budget = args.epsilon_per_client_total
         args.total_privacy_budget = budget
+        args.epsilon_per_client_total = budget
         privacy_config = make_privacy_config(args)
         train_val_data, X_test, y_test, classes, failure_plan = _load_suite_data(args, privacy_config)
         write_data_artifacts(output_dir, args, train_val_data, X_test, y_test, classes, failure_plan)
@@ -3079,6 +3137,7 @@ def run_privacy_sensitivity_suite(args, output_dir):
                 )
         _save_suite_summary(os.path.join(output_dir, f"budget_{budget:g}"), budget_results)
         args.total_privacy_budget = original_budget
+        args.epsilon_per_client_total = original_per_client_budget
 
     _write_csv(os.path.join(output_dir, "privacy_sensitivity_summary.csv"), summary_rows)
     _write_csv(os.path.join(output_dir, "privacy_sensitivity_final_metrics.csv"), final_rows)

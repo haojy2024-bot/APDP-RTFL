@@ -1,0 +1,1 @@
+main.py --experiment-suite baselines --methods dp_fl,apdp_rtfl --run-name smoke_client_dpsgd --output-root results_2 --dataset emnist --emnist-split balanced --max-samples 500 --num-clients 5 --num-rounds 2 --client-epochs 1 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 64 --failure-prob 0 --backend sklearn --seed 42

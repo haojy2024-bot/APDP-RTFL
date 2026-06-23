@@ -1,0 +1,3 @@
+method,label,comparison_role,dp_scope,use_dp,dynamic_privacy,compute_adapter,use_zkip,use_ebcd,use_tcm,fedprox,force_client_epochs,reference
+dp_fl,DP-FL,default_dp_baseline,client,True,False,False,False,False,False,False,,"Arachchige et al., Local differential privacy for deep learning, IEEE Internet of Things Journal 2019/2020."
+apdp_rtfl,APDP-RTFL,default_dp_baseline,client,True,True,True,True,True,True,False,,

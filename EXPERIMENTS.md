@@ -6,9 +6,9 @@ This guide defines reproducible commands for the regulated-industry APDP-RTFL st
 python APDP-RTFL/main.py <arguments>
 ```
 
-The default result location is `results/<run-name>/`. Set `--run-name` explicitly for every formal run. Use the same dataset split, client count, round count, partition, privacy-budget parameters, seed list, and backend within one comparison table or figure.
+The result location is `results/<run-name>_YYYYmmdd_HHMMSS/`. Set `--run-name` explicitly as a logical experiment-name prefix for every formal run; the runner always appends its launch timestamp, including when a prefix is supplied. Use the same dataset split, client count, round count, partition, privacy-budget parameters, seed list, and backend within one comparison table or figure.
 
-Each run directory is write-once: an existing `--run-name` is rejected to prevent mixed artifacts. Every new run writes `run_config.json`, `run_command.txt`, `environment.json`, `data_artifacts/`, and `artifact_manifest.csv`. The data-artifact directory contains dataset fingerprints, client split summaries, and the generated failure plan; method directories with TCM enabled also contain `tcm_manifest.csv` and recoverable `checkpoints/*.npz` files.
+Each timestamped run directory is write-once: an existing final directory is rejected to prevent mixed artifacts. Every new run writes `run_config.json`, `run_command.txt`, `environment.json`, `data_artifacts/`, and `artifact_manifest.csv`. The data-artifact directory contains dataset fingerprints, client split summaries, and the generated failure plan; method directories with TCM enabled also contain `tcm_manifest.csv` and recoverable `checkpoints/*.npz` files.
 
 ## Common Formal Setting
 
@@ -22,9 +22,15 @@ For small smoke tests only, add `--max-samples 500 --num-rounds 2 --num-clients 
 
 ## 1. DP Baseline Comparison
 
+### Client-side DP-SGD accounting
+
+Client-DP methods use sample-level local DP-SGD: clipping and Gaussian noise are applied locally to per-sample gradients, while the server does not add new aggregation-side DP noise. `--epsilon-per-client-total` is the target `(epsilon, delta)` budget for each client's complete training trace (default epsilon 5, delta `1e-5`), accumulated with an RDP accountant from actual DP-SGD steps. The legacy `--total-privacy-budget` option is retained only as a compatibility alias and is no longer a budget pool divided among clients or reset each round.
+
+The expected local DP-SGD batch size is 256 (`--dp-batch-size`). Client-DP outputs include `privacy_accounting.csv` and `privacy_accounting_summary.csv`; report final client epsilon, target epsilon, and any budget-exhausted events.
+
 The default `--methods all` contains only the DP comparison set:
 
-`DP-FL`, `DP-FLProx`, `DP-FedSGD`, `Global-DP`, `DP-RTFL`, and `APDP-RTFL`.
+`DP-FL`, `DP-FLProx`, `DP-FedSGD`, `DP-RTFL`, and `APDP-RTFL`. `Global-DP` remains available only when explicitly requested and is not part of the default main table.
 
 ```powershell
 python APDP-RTFL/main.py --experiment-suite baselines --methods all --run-name baseline_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --total-privacy-budget 5 --min-epsilon 0.1 --max-epsilon 2 --dp-epsilon 1 --dp-delta 1e-5 --dp-l2-norm-clip 1 --backend sklearn --seed 42
@@ -129,7 +135,7 @@ Before pooling seeds, retain each raw run directory. Aggregate only the relevant
 
 ## 8. Multi-Seed Aggregation and Paper Tables
 
-Run each formal command once per seed, keeping a stable name pattern. For example, repeat the primary baseline command with `--run-name baseline_emnist_seed42`, `baseline_emnist_seed43`, and `baseline_emnist_seed44`.
+Run each formal command once per seed, keeping a stable prefix pattern. For example, use `--run-name baseline_emnist_seed42`, `baseline_emnist_seed43`, and `baseline_emnist_seed44`; the runner produces directories such as `baseline_emnist_seed42_20260623_103617` automatically.
 
 Aggregate the raw baseline directories without modifying them:
 

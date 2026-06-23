@@ -1,0 +1,60 @@
+relative_path,artifact_type,source_files,description
+agg_client_counts.png,chart,metrics.csv,Chart source mapping
+client_privacy_quality_summary.csv,data,,Experiment artifact
+delta_norm.png,chart,metrics.json,Chart source mapping
+dp_noise_scale.png,chart,metrics.csv,Chart source mapping
+earlystop_server_best_val_acc.png,chart,metrics.json,Chart source mapping
+ebcd_alerts.png,chart,metrics.csv,Chart source mapping
+ebcd_stats.png,chart,metrics.csv,Chart source mapping
+environment.json,data,,Experiment artifact
+epsilon_vs_data_quality.png,chart,client_privacy_quality_summary.csv,Chart source mapping
+global_metrics.png,chart,metrics.csv;metrics.json,Chart source mapping
+metrics.csv,data,,Experiment artifact
+metrics.json,data,,Experiment artifact
+per_client_ebcd_kurtosis.png,chart,per_client_ebcd_stats.npy,Chart source mapping
+per_client_ebcd_skewness.png,chart,per_client_ebcd_stats.npy,Chart source mapping
+per_client_ebcd_stats.npy,data,,Experiment artifact
+per_client_ebcd_variance.png,chart,per_client_ebcd_stats.npy,Chart source mapping
+per_client_epsilon.npy,data,,Experiment artifact
+per_client_epsilon_dynamic_dp.png,chart,per_client_epsilon.npy,Chart source mapping
+per_client_update_norms.npy,data,,Experiment artifact
+per_client_update_norms.png,chart,per_client_update_norms.npy,Chart source mapping
+per_client_zkip_status.npy,data,,Experiment artifact
+per_client_zkip_status.png,chart,per_client_zkip_status.npy,Chart source mapping
+privacy_budget_allocation.png,chart,metrics.json,Chart source mapping
+run_command.txt,data,,Experiment artifact
+run_config.json,data,,Experiment artifact
+server_status.png,chart,metrics.json,Chart source mapping
+tcm_manifest.csv,data,,Experiment artifact
+tcm_state_count.png,chart,metrics.csv;tcm_manifest.csv,Chart source mapping
+zkip_failures.png,chart,metrics.csv,Chart source mapping
+data_artifacts/client_partition_manifest.csv,data,,Experiment artifact
+data_artifacts/dataset_manifest.json,data,,Experiment artifact
+data_artifacts/failure_plan.npy,data,,Experiment artifact
+checkpoints/model_04de1621b862ceca.npz,data,,Experiment artifact
+checkpoints/model_079724cdf2a2452c.npz,data,,Experiment artifact
+checkpoints/model_118e2556b27558de.npz,data,,Experiment artifact
+checkpoints/model_42a30d4b3a099f10.npz,data,,Experiment artifact
+checkpoints/model_4899d91b217e8e31.npz,data,,Experiment artifact
+checkpoints/model_4e79d2126c4bda73.npz,data,,Experiment artifact
+checkpoints/model_6aa39f48988d66ef.npz,data,,Experiment artifact
+checkpoints/model_6bdefcdb4911a068.npz,data,,Experiment artifact
+checkpoints/model_6c0a3e3e0a7f826b.npz,data,,Experiment artifact
+checkpoints/model_748ca097714410e6.npz,data,,Experiment artifact
+checkpoints/model_751b6eac6dd22305.npz,data,,Experiment artifact
+checkpoints/model_786ac29de91cf3bb.npz,data,,Experiment artifact
+checkpoints/model_7f08e884cabeec02.npz,data,,Experiment artifact
+checkpoints/model_7fcfddce1f0126aa.npz,data,,Experiment artifact
+checkpoints/model_80a78a065dd32da9.npz,data,,Experiment artifact
+checkpoints/model_8d0315ef93fc03ac.npz,data,,Experiment artifact
+checkpoints/model_924ddc385722e1dd.npz,data,,Experiment artifact
+checkpoints/model_95d93b99911ee416.npz,data,,Experiment artifact
+checkpoints/model_a09b4489c46bd284.npz,data,,Experiment artifact
+checkpoints/model_a42c4f7d5d21a410.npz,data,,Experiment artifact
+checkpoints/model_a57e807c39dea42f.npz,data,,Experiment artifact
+checkpoints/model_acabb0a2929c65d1.npz,data,,Experiment artifact
+checkpoints/model_c53296046a9edea9.npz,data,,Experiment artifact
+checkpoints/model_d5bbfdd67f481a5d.npz,data,,Experiment artifact
+checkpoints/model_e4c0dbf423946cf2.npz,data,,Experiment artifact
+checkpoints/model_eace63ebedbaf2f0.npz,data,,Experiment artifact
+checkpoints/model_f606d4852af3c3dd.npz,data,,Experiment artifact

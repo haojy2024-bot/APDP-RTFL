@@ -1,0 +1,18 @@
+relative_path,artifact_type,source_files,description
+agg_client_counts.png,chart,metrics.csv,Chart source mapping
+delta_norm.png,chart,metrics.json,Chart source mapping
+dp_noise_scale.png,chart,metrics.csv,Chart source mapping
+ebcd_alerts.png,chart,metrics.csv,Chart source mapping
+global_metrics.png,chart,metrics.csv;metrics.json,Chart source mapping
+metrics.csv,data,,Experiment artifact
+metrics.json,data,,Experiment artifact
+per_client_ebcd_stats.npy,data,,Experiment artifact
+per_client_epsilon.npy,data,,Experiment artifact
+per_client_noise_multiplier.npy,data,,Experiment artifact
+per_client_update_norms.npy,data,,Experiment artifact
+per_client_update_norms.png,chart,per_client_update_norms.npy,Chart source mapping
+per_client_zkip_status.npy,data,,Experiment artifact
+privacy_accounting.csv,data,,Experiment artifact
+privacy_accounting_summary.csv,data,,Experiment artifact
+tcm_state_count.png,chart,metrics.csv;tcm_manifest.csv,Chart source mapping
+zkip_failures.png,chart,metrics.csv,Chart source mapping

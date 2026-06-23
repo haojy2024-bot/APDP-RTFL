@@ -1,0 +1,418 @@
+{
+  "method": "apdp_rtfl",
+  "label": "APDP-RTFL",
+  "reference": "",
+  "participation_policy": "all",
+  "ablation_scenario": "",
+  "regulatory_enabled": false,
+  "pollution_enabled": false,
+  "fairness_enabled": false,
+  "contribution_enabled": false,
+  "synthetic_sensitive_metadata": [],
+  "rounds": [
+    1,
+    2
+  ],
+  "accuracies": [
+    0.05,
+    0.07
+  ],
+  "balanced_accuracies": [
+    0.07539682539682539,
+    0.057539682539682536
+  ],
+  "f1_scores": [
+    0.058385093167701865,
+    0.06345755693581781
+  ],
+  "precisions": [
+    0.05434782608695652,
+    0.09057971014492752
+  ],
+  "recalls": [
+    0.06884057971014493,
+    0.05253623188405797
+  ],
+  "aucs": [
+    null,
+    null
+  ],
+  "round_durations": [
+    0.605212926864624,
+    0.603076696395874
+  ],
+  "agg_client_counts": [
+    5,
+    5
+  ],
+  "selected_client_counts": [
+    5,
+    5
+  ],
+  "dp_noise_scales": [
+    0.03006100558895854,
+    0.03006100558895854
+  ],
+  "zkip_failures": [
+    0,
+    0
+  ],
+  "delta_norms": [
+    0.06647759099853515,
+    0.0681817268883572
+  ],
+  "ebcd_alerts": [
+    0,
+    0
+  ],
+  "tcm_counts": [
+    1,
+    2
+  ],
+  "per_client_update_norms": [
+    [
+      0.07975662151053933,
+      0.08457621687112679,
+      0.051210765831105655,
+      0.045929891129227615,
+      0.07091445965067636
+    ],
+    [
+      0.07973536660486148,
+      0.08497790263836359,
+      0.05155911553163874,
+      0.04620301659690338,
+      0.07843323307001883
+    ]
+  ],
+  "per_client_ebcd_stats": [
+    [
+      [
+        1.7233549668318238e-07,
+        -0.026809313558253667,
+        0.011354872843072057
+      ],
+      [
+        1.937855029557419e-07,
+        0.020293020844808662,
+        -0.006778665498767582
+      ],
+      [
+        7.107389172303677e-08,
+        0.04736295923295186,
+        -0.012135666229557824
+      ],
+      [
+        5.717520564382403e-08,
+        -0.021513941152623506,
+        0.003295957423413496
+      ],
+      [
+        1.3627133793164656e-07,
+        -0.02404016198981518,
+        0.00778477730138006
+      ]
+    ],
+    [
+      [
+        1.7229519982921413e-07,
+        0.003318548391194831,
+        -0.019147195908894018
+      ],
+      [
+        1.9570924770145662e-07,
+        0.022772903913223175,
+        0.010376948620679493
+      ],
+      [
+        7.20814776895868e-08,
+        0.012281032174326967,
+        -0.009509649227113032
+      ],
+      [
+        5.7881540898989016e-08,
+        0.013076645731078251,
+        0.028704969045481303
+      ],
+      [
+        1.666639116319552e-07,
+        0.005880943478732359,
+        0.0037288632450995607
+      ]
+    ]
+  ],
+  "per_client_zkip_status": [
+    [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  ],
+  "per_client_epsilon": [
+    [
+      3.442980242523526,
+      3.4704437697429995,
+      3.442980242523526,
+      3.442980242523526,
+      3.5711533061189504
+    ],
+    [
+      5.0,
+      5.0,
+      5.0,
+      5.0,
+      5.0
+    ]
+  ],
+  "per_client_noise_multiplier": [
+    [
+      1.491426132877198,
+      2.017484952743823,
+      1.491426132877198,
+      1.491426132877198,
+      1.7065889372016763
+    ],
+    [
+      1.491426132877198,
+      2.017484952743823,
+      1.491426132877198,
+      1.491426132877198,
+      1.7065889372016763
+    ]
+  ],
+  "privacy_accounting_records": [
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_0",
+      "round": 1,
+      "steps": 1,
+      "sample_rate": 1.0,
+      "noise_multiplier": 1.491426132877198,
+      "cumulative_epsilon": 3.442980242523526,
+      "incremental_epsilon": 3.442980242523526,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 1.557019757476474,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_1",
+      "round": 1,
+      "steps": 2,
+      "sample_rate": 0.927536231884058,
+      "noise_multiplier": 2.017484952743823,
+      "cumulative_epsilon": 3.4704437697429995,
+      "incremental_epsilon": 3.4704437697429995,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 1.5295562302570005,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_2",
+      "round": 1,
+      "steps": 1,
+      "sample_rate": 1.0,
+      "noise_multiplier": 1.491426132877198,
+      "cumulative_epsilon": 3.442980242523526,
+      "incremental_epsilon": 3.442980242523526,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 1.557019757476474,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_3",
+      "round": 1,
+      "steps": 1,
+      "sample_rate": 1.0,
+      "noise_multiplier": 1.491426132877198,
+      "cumulative_epsilon": 3.442980242523526,
+      "incremental_epsilon": 3.442980242523526,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 1.557019757476474,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_4",
+      "round": 1,
+      "steps": 2,
+      "sample_rate": 0.6808510638297872,
+      "noise_multiplier": 1.7065889372016763,
+      "cumulative_epsilon": 3.5711533061189504,
+      "incremental_epsilon": 3.5711533061189504,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 1.4288466938810496,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_0",
+      "round": 2,
+      "steps": 1,
+      "sample_rate": 1.0,
+      "noise_multiplier": 1.491426132877198,
+      "cumulative_epsilon": 5.0,
+      "incremental_epsilon": 1.557019757476474,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 0.0,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_1",
+      "round": 2,
+      "steps": 2,
+      "sample_rate": 0.927536231884058,
+      "noise_multiplier": 2.017484952743823,
+      "cumulative_epsilon": 5.0,
+      "incremental_epsilon": 1.5295562302570005,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 0.0,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_2",
+      "round": 2,
+      "steps": 1,
+      "sample_rate": 1.0,
+      "noise_multiplier": 1.491426132877198,
+      "cumulative_epsilon": 5.0,
+      "incremental_epsilon": 1.557019757476474,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 0.0,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_3",
+      "round": 2,
+      "steps": 1,
+      "sample_rate": 1.0,
+      "noise_multiplier": 1.491426132877198,
+      "cumulative_epsilon": 5.0,
+      "incremental_epsilon": 1.557019757476474,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 0.0,
+      "status": "spent"
+    },
+    {
+      "method": "apdp_rtfl",
+      "client_id": "client_4",
+      "round": 2,
+      "steps": 2,
+      "sample_rate": 0.6808510638297872,
+      "noise_multiplier": 1.7065889372016763,
+      "cumulative_epsilon": 5.0,
+      "incremental_epsilon": 1.4288466938810496,
+      "target_epsilon": 5.0,
+      "remaining_epsilon": 0.0,
+      "status": "spent"
+    }
+  ],
+  "regulatory_records": [],
+  "regulatory_warning_counts": [
+    0,
+    0
+  ],
+  "regulatory_downweight_counts": [
+    0,
+    0
+  ],
+  "regulatory_quarantine_counts": [
+    0,
+    0
+  ],
+  "regulatory_avg_risks": [
+    0.0,
+    0.0
+  ],
+  "pollution_records": [],
+  "fairness_records": [],
+  "client_accuracy_gaps": [
+    0.0,
+    0.0
+  ],
+  "client_accuracy_stds": [
+    0.0,
+    0.0
+  ],
+  "client_min_accuracies": [
+    null,
+    null
+  ],
+  "epsilon_gaps": [
+    0.0,
+    0.0
+  ],
+  "epsilon_stds": [
+    0.0,
+    0.0
+  ],
+  "participation_gaps": [
+    0.0,
+    0.0
+  ],
+  "participation_stds": [
+    0.0,
+    0.0
+  ],
+  "contribution_records": [],
+  "avg_contribution_scores": [
+    0.0,
+    0.0
+  ],
+  "contribution_score_gaps": [
+    0.0,
+    0.0
+  ],
+  "contribution_score_stds": [
+    0.0,
+    0.0
+  ],
+  "avg_approx_shapley": [
+    0.0,
+    0.0
+  ],
+  "approx_shapley_gaps": [
+    0.0,
+    0.0
+  ],
+  "approx_shapley_stds": [
+    0.0,
+    0.0
+  ],
+  "avg_risk_penalties": [
+    0.0,
+    0.0
+  ],
+  "avg_fairness_penalties": [
+    0.0,
+    0.0
+  ],
+  "avg_weight_alignment_errors": [
+    0.0,
+    0.0
+  ],
+  "max_weight_alignment_errors": [
+    0.0,
+    0.0
+  ],
+  "final_group_accuracy_gap": 0.0,
+  "final_worst_group_accuracy": null,
+  "final_group_f1_gap": 0.0,
+  "final_group_epsilon_gap": 0.0,
+  "final_group_participation_gap": 0.0,
+  "final_group_quarantine_gap": 0.0
+}

@@ -1,0 +1,7 @@
+method,label,comparison_role,dp_scope,use_dp,dynamic_privacy,compute_adapter,use_zkip,use_ebcd,use_tcm,fedprox,force_client_epochs,reference
+dp_fl,DP-FL,default_dp_baseline,client,True,False,False,False,False,False,False,,"Arachchige et al., Local differential privacy for deep learning, IEEE Internet of Things Journal 2019/2020."
+dp_flprox,DP-FLProx,default_dp_baseline,client,True,False,False,False,False,False,True,,"Li et al., Federated optimization in heterogeneous networks, MLSys 2020."
+dp_fedsgd,DP-FedSGD,default_dp_baseline,client,True,False,False,False,False,False,False,1,"Auddy et al., Statistical Limits and Efficient Algorithms for Differentially Private Federated Learning, arXiv:2605.18656, 2026."
+global_dp,Global-DP,default_dp_baseline,server,False,False,False,False,False,False,False,,
+dp_rtfl,DP-RTFL,default_dp_baseline,client,True,False,False,True,True,True,False,,
+apdp_rtfl,APDP-RTFL,default_dp_baseline,client,True,True,True,True,True,True,False,,

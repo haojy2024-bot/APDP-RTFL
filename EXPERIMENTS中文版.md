@@ -6,9 +6,9 @@
 python APDP-RTFL/main.py <arguments>
 ```
 
-默认结果路径为 `results/<run-name>/`。每次正式实验均应显式指定 `--run-name`。同一张比较表或同一幅图中的所有方法，必须使用相同的数据集划分、客户端数量、训练轮数、数据划分方式、隐私预算参数、随机种子集合和后端。
+结果路径为 `results/<run-name>_YYYYmmdd_HHMMSS/`。每次正式实验均应显式指定 `--run-name` 作为逻辑实验名前缀；即使已指定前缀，程序也会自动追加启动时间戳。同一张比较表或同一幅图中的所有方法，必须使用相同的数据集划分、客户端数量、训练轮数、数据划分方式、隐私预算参数、随机种子集合和后端。
 
-每个运行目录均采用一次写入规则：若 `--run-name` 已存在，程序会拒绝运行，以防止不同实验产物混入同一目录。每次新运行都会生成 `run_config.json`、`run_command.txt`、`environment.json`、`data_artifacts/` 和 `artifact_manifest.csv`。其中 `data_artifacts/` 保存数据集指纹、客户端划分摘要和已生成的掉线计划；启用 TCM 的方法目录还会保存 `tcm_manifest.csv` 与可恢复的 `checkpoints/*.npz` 文件。
+每个带时间戳的运行目录均采用一次写入规则：若最终目录已存在，程序会拒绝运行，以防止不同实验产物混入同一目录。每次新运行都会生成 `run_config.json`、`run_command.txt`、`environment.json`、`data_artifacts/` 和 `artifact_manifest.csv`。其中 `data_artifacts/` 保存数据集指纹、客户端划分摘要和已生成的掉线计划；启用 TCM 的方法目录还会保存 `tcm_manifest.csv` 与可恢复的 `checkpoints/*.npz` 文件。
 
 ## 通用正式实验设置
 
@@ -24,7 +24,13 @@ python APDP-RTFL/main.py <arguments>
 
 默认的 `--methods all` 仅包含 DP 对照组：
 
-`DP-FL`、`DP-FLProx`、`DP-FedSGD`、`Global-DP`、`DP-RTFL` 和 `APDP-RTFL`。
+`DP-FL`、`DP-FLProx`、`DP-FedSGD`、`DP-RTFL` 和 `APDP-RTFL`。`Global-DP` 保留为显式可运行的历史对照，但不再纳入默认主表。
+
+## 客户端 DP-SGD 与隐私会计
+
+客户端 DP 方法采用样本级本地 DP-SGD：每个客户端在本地按 Poisson mini-batch 进行逐样本梯度裁剪和高斯加噪，服务器不额外注入聚合端 DP 噪声。`--epsilon-per-client-total` 表示**每个客户端整个训练过程**的目标预算，默认值为 5，`--dp-delta` 默认 `1e-5`，并由 RDP 会计器按实际 DP-SGD 步数累计。旧参数 `--total-privacy-budget` 仅作为该参数的兼容别名，不再表示可在客户端之间分割并在每轮重置的共享预算。
+
+默认 DP-SGD 的期望本地 batch size 为 256，可通过 `--dp-batch-size` 修改。每次客户端 DP 运行都会输出 `privacy_accounting.csv` 与 `privacy_accounting_summary.csv`；报告时应给出每个客户端的最终 epsilon、目标 epsilon 和预算耗尽事件数。
 
 ```powershell
 python APDP-RTFL/main.py --experiment-suite baselines --methods all --run-name baseline_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --total-privacy-budget 5 --min-epsilon 0.1 --max-epsilon 2 --dp-epsilon 1 --dp-delta 1e-5 --dp-l2-norm-clip 1 --backend sklearn --seed 42
@@ -129,7 +135,7 @@ python APDP-RTFL/main.py --experiment-suite ablation --ablation-method apdp_rtfl
 
 ## 8. 多随机种子汇总与论文主表
 
-每个正式命令应针对每一个 seed 单独运行，并保持稳定的命名模式。例如，主基线实验依次使用 `--run-name baseline_emnist_seed42`、`baseline_emnist_seed43` 和 `baseline_emnist_seed44`。
+每个正式命令应针对每一个 seed 单独运行，并保持稳定的命名前缀。例如，主基线实验依次使用 `--run-name baseline_emnist_seed42`、`baseline_emnist_seed43` 和 `baseline_emnist_seed44`；程序会自动产生如 `baseline_emnist_seed42_20260623_103617` 的结果目录。
 
 在不修改原始基线目录的前提下进行汇总：
 
