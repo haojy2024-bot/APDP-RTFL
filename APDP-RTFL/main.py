@@ -108,6 +108,8 @@ def parse_args():
                         help="Comma-separated candidate fractions of parameter blocks uploaded by ARPA clients.")
     parser.add_argument("--parameter-blocks", type=int, default=8,
                         help="Number of deterministic parameter blocks used by ARPA partial updates.")
+    parser.add_argument("--arpa-min-initial-privacy-spend", type=float, default=0.25,
+                        help="One-time minimum projected epsilon increment that prevents an ARPA cold-start deadlock.")
     parser.add_argument("--participation-rate", type=float, default=0.6,
                         help="Client participation ratio for --experiment-suite participation.")
     parser.add_argument("--participation-policies", default="all,random,apdp_score",

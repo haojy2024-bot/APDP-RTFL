@@ -110,7 +110,7 @@ class ResourcePrivacyOrchestrator:
 
     def __init__(self, profiles: dict[int, ResourceProfile], seed: int, deadline_seconds: float,
                  reference_batch_seconds: float, upload_ratios: tuple[float, ...], block_count: int,
-                 enforce_tier_coverage: bool = True):
+                 enforce_tier_coverage: bool = True, minimum_initial_privacy_increment: float = 0.25):
         self.profiles = profiles
         self.seed = seed
         self.deadline_seconds = float(deadline_seconds)
@@ -118,6 +118,9 @@ class ResourcePrivacyOrchestrator:
         self.upload_ratios = tuple(sorted({float(item) for item in upload_ratios}, reverse=True))
         self.block_count = int(block_count)
         self.enforce_tier_coverage = bool(enforce_tier_coverage)
+        self.minimum_initial_privacy_increment = float(minimum_initial_privacy_increment)
+        if self.minimum_initial_privacy_increment <= 0:
+            raise ValueError("minimum_initial_privacy_increment must be positive")
 
     def snapshot(self, client_idx: int, round_num: int) -> ResourceSnapshot:
         profile = self.profiles[client_idx]
@@ -161,15 +164,19 @@ class ResourcePrivacyOrchestrator:
                 trace.append(self._trace_row(snapshot, None, "unavailable" if not snapshot.online else "quarantine"))
                 continue
             state = privacy_states.get(idx)
+            deadline_feasible = False
+            privacy_rejected = False
             for epochs in range(int(base_epochs), 0, -1):
                 chosen = None
                 for ratio in self.upload_ratios:
                     comp, comm, total = self.predict_seconds(snapshot, sample_counts[idx], batch_size, epochs, ratio, model_bytes)
                     if total > self.deadline_seconds:
                         continue
+                    deadline_feasible = True
                     steps = epochs * int(np.ceil(max(1, sample_counts[idx]) / max(1, batch_size)))
                     noise, spend = self._privacy_choice(state, steps, remaining_rounds, quality_scores.get(idx, 0.0), contribution_scores.get(idx, 0.0), risk_action)
                     if state is not None and noise is None:
+                        privacy_rejected = True
                         continue
                     chosen = PlannedAction(idx, epochs, ratio, noise, comp, comm, total, spend, 0.0)
                     break
@@ -179,7 +186,8 @@ class ResourcePrivacyOrchestrator:
                     debt_values[idx] = max(participation_counts) - participation_counts[idx] if participation_counts else 0.0
                     break
             if idx not in candidates:
-                trace.append(self._trace_row(snapshot, None, "deadline_or_privacy"))
+                status = "privacy_budget_infeasible" if deadline_feasible and privacy_rejected else "deadline_infeasible"
+                trace.append(self._trace_row(snapshot, None, status))
 
         slack = self._normalized(slack_values)
         debt = self._normalized(debt_values)
@@ -202,6 +210,11 @@ class ResourcePrivacyOrchestrator:
         remaining = accountant.remaining_epsilon
         target = remaining / max(1, remaining_rounds)
         target *= 0.75 + 0.25 * float(np.clip((quality + abs(contribution)) / 2.0, 0.0, 1.0))
+        # A strict remaining-budget / remaining-rounds split can be lower than the
+        # privacy cost of one valid DP-SGD action, causing a cold-start deadlock.
+        # Reserve a one-time feasible spend; all later actions use the dynamic rule.
+        if accountant.epsilon <= 1e-12:
+            target = max(target, min(remaining, self.minimum_initial_privacy_increment))
         if risk_action in {"warning", "downweight"}:
             target *= 0.7
         base = state["base_noise_multiplier"]

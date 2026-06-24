@@ -55,6 +55,46 @@ class ResourceOrchestratorTests(unittest.TestCase):
             self.assertLessEqual(action.predicted_total_seconds, 2.0)
             self.assertIsNotNone(action.noise_multiplier)
 
+    def test_first_round_uses_cold_start_spend_and_records_reason(self):
+        profiles = build_resource_profiles(5, 42)
+        orchestrator = ResourcePrivacyOrchestrator(profiles, 42, 5.0, 0.01, (1.0,), 4)
+        privacy_states = {
+            idx: {"accountant": RDPAccountant(5.0, 1e-5), "base_noise_multiplier": 4.0, "sample_rate": 0.1}
+            for idx in profiles
+        }
+        actions, trace = orchestrator.plan(
+            round_num=1, sample_counts={idx: 100 for idx in profiles}, batch_size=10, base_epochs=1,
+            model_bytes=1024, participation_counts=[0] * 5, contribution_scores={idx: 0.0 for idx in profiles},
+            quality_scores={idx: 0.5 for idx in profiles}, privacy_states=privacy_states,
+            remaining_rounds=50, target_count=5, eligible_indices=set(profiles),
+        )
+        self.assertTrue(actions)
+        self.assertFalse(any(row["status"] == "deadline_or_privacy" for row in trace))
+        self.assertTrue(all(action.privacy_target_increment >= 0.1 for action in actions.values()))
+
+    def test_trace_separates_deadline_and_privacy_rejections(self):
+        profiles = build_resource_profiles(3, 7)
+        privacy_states = {
+            idx: {"accountant": RDPAccountant(0.001, 1e-5), "base_noise_multiplier": 2.0, "sample_rate": 0.1}
+            for idx in profiles
+        }
+        privacy_limited = ResourcePrivacyOrchestrator(profiles, 7, 5.0, 0.001, (1.0,), 4)
+        _, trace = privacy_limited.plan(
+            round_num=1, sample_counts={idx: 10 for idx in profiles}, batch_size=10, base_epochs=1,
+            model_bytes=100, participation_counts=[0] * 3, contribution_scores={idx: 0.0 for idx in profiles},
+            quality_scores={idx: 0.5 for idx in profiles}, privacy_states=privacy_states,
+            remaining_rounds=1, target_count=3, eligible_indices=set(profiles),
+        )
+        self.assertIn("privacy_budget_infeasible", {row["status"] for row in trace})
+        deadline_limited = ResourcePrivacyOrchestrator(profiles, 7, 1e-9, 0.001, (1.0,), 4)
+        _, trace = deadline_limited.plan(
+            round_num=1, sample_counts={idx: 10 for idx in profiles}, batch_size=10, base_epochs=1,
+            model_bytes=100, participation_counts=[0] * 3, contribution_scores={idx: 0.0 for idx in profiles},
+            quality_scores={idx: 0.5 for idx in profiles}, privacy_states={},
+            remaining_rounds=1, target_count=3, eligible_indices=set(profiles),
+        )
+        self.assertIn("deadline_infeasible", {row["status"] for row in trace})
+
 
 if __name__ == "__main__":
     unittest.main()

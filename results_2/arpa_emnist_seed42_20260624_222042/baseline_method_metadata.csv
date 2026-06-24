@@ -1,0 +1,2 @@
+method,label,comparison_role,dp_scope,use_dp,dynamic_privacy,compute_adapter,use_zkip,use_ebcd,use_tcm,fedprox,force_client_epochs,reference
+apdp_rtfl,APDP-RTFL,default_dp_baseline,client,True,True,True,True,True,True,False,,

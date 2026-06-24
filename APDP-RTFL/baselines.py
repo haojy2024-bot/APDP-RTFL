@@ -1594,8 +1594,9 @@ def _run_single_method(
     resource_orchestrator = None
     resource_profiles = []
     if resource_simulation_enabled:
-        if args.round_deadline_seconds <= 0 or args.reference_batch_seconds <= 0 or args.parameter_blocks <= 0:
-            raise ValueError("ARPA deadline, reference batch duration, and parameter block count must be positive")
+        if (args.round_deadline_seconds <= 0 or args.reference_batch_seconds <= 0
+                or args.parameter_blocks <= 0 or args.arpa_min_initial_privacy_spend <= 0):
+            raise ValueError("ARPA deadline, reference duration, parameter blocks, and initial privacy spend must be positive")
         profiles = build_resource_profiles(len(clients), args.seed)
         resource_orchestrator = ResourcePrivacyOrchestrator(
             profiles=profiles,
@@ -1605,6 +1606,7 @@ def _run_single_method(
             upload_ratios=(1.0,) if not arpa_enabled or config.get("force_full_upload", False) else _parse_upload_ratios(args.upload_ratios),
             block_count=args.parameter_blocks,
             enforce_tier_coverage=config.get("resource_fairness", True),
+            minimum_initial_privacy_increment=args.arpa_min_initial_privacy_spend,
         )
         resource_profiles = [profile.__dict__.copy() for profile in profiles.values()]
     residuals = {
