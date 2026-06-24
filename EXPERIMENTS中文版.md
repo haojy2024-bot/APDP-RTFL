@@ -20,6 +20,16 @@ python APDP-RTFL/main.py <arguments>
 
 仅用于功能验证的小样本测试可附加 `--max-samples 500 --num-rounds 2 --num-clients 5`。小样本结果不得写入论文。
 
+## ARPA-RTFL：受监管资源—隐私联合编排
+
+将 `--heterogeneity-profile regulated_generic` 用于启用 ARPA-RTFL。该模式以可复现的受限、标准、高性能三档资源画像模拟计算吞吐、上行带宽、RTT 与在线波动；在不改变每客户端总 RDP 账本的前提下，联合选择本地 epoch、参数块上传比例和 DP-SGD 噪声。不要把此模拟表述为真实行业设备实测。
+
+```powershell
+python APDP-RTFL/main.py --experiment-suite baselines --methods apdp_rtfl --run-name arpa_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --backend sklearn --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --seed 42
+```
+
+每个 ARPA 运行额外输出 `resource_profiles.csv`、`resource_trace.csv`、`orchestration_decisions.csv` 和 `partial_update_metrics.csv`。消融时使用 `no_resource_orchestration`、`no_partial_updates`、`no_resource_fairness`，并与 `no_adaptive_privacy`、`no_regulatory` 一同报告。
+
 ## 1. DP 基线对照
 
 默认的 `--methods all` 仅包含 DP 对照组：

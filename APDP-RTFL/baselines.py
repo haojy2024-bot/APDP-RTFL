@@ -18,6 +18,13 @@ from fl_server import FLServer
 import charting as charts
 from experiment_artifacts import export_tcm_checkpoints, write_artifact_manifest, write_data_artifacts
 from privacy_accounting import RDPAccountant, calibrate_noise_multiplier
+from resource_orchestrator import (
+    ResourcePrivacyOrchestrator,
+    build_resource_profiles,
+    mask_delta,
+    parameter_bytes,
+    rotating_block_mask,
+)
 
 
 TOTAL_PRIVACY_BUDGET = 5.0
@@ -40,6 +47,9 @@ ABLATION_SCENARIOS = (
     "full",
     "no_adaptive_privacy",
     "no_compute_adapter",
+    "no_resource_orchestration",
+    "no_partial_updates",
+    "no_resource_fairness",
     "no_zkip",
     "no_ebcd",
     "no_tcm",
@@ -109,6 +119,7 @@ METHOD_CONFIGS = {
         "use_tcm": False,
         "fedprox": False,
         "force_client_epochs": None,
+        "resource_orchestrator": False,
     },
     "fedprox": {
         "label": "FedProx",
@@ -122,6 +133,7 @@ METHOD_CONFIGS = {
         "use_tcm": False,
         "fedprox": True,
         "force_client_epochs": None,
+        "resource_orchestrator": False,
     },
     "ldp_fl": {
         "label": "LDP-FL",
@@ -135,6 +147,7 @@ METHOD_CONFIGS = {
         "use_tcm": False,
         "fedprox": False,
         "force_client_epochs": None,
+        "resource_orchestrator": False,
     },
     "dp_fl": {
         "label": "DP-FL",
@@ -148,6 +161,7 @@ METHOD_CONFIGS = {
         "use_tcm": False,
         "fedprox": False,
         "force_client_epochs": None,
+        "resource_orchestrator": False,
     },
     "dp_flprox": {
         "label": "DP-FLProx",
@@ -161,6 +175,7 @@ METHOD_CONFIGS = {
         "use_tcm": False,
         "fedprox": True,
         "force_client_epochs": None,
+        "resource_orchestrator": False,
     },
     "dp_fedsgd": {
         "label": "DP-FedSGD",
@@ -174,6 +189,7 @@ METHOD_CONFIGS = {
         "use_tcm": False,
         "fedprox": False,
         "force_client_epochs": 1,
+        "resource_orchestrator": False,
     },
     "global_dp": {
         "label": "Global-DP",
@@ -187,6 +203,7 @@ METHOD_CONFIGS = {
         "use_tcm": False,
         "fedprox": False,
         "force_client_epochs": None,
+        "resource_orchestrator": False,
     },
     "dp_rtfl": {
         "label": "DP-RTFL",
@@ -200,6 +217,7 @@ METHOD_CONFIGS = {
         "use_tcm": True,
         "fedprox": False,
         "force_client_epochs": None,
+        "resource_orchestrator": False,
     },
     "apdp_rtfl": {
         "label": "APDP-RTFL",
@@ -213,6 +231,7 @@ METHOD_CONFIGS = {
         "use_tcm": True,
         "fedprox": False,
         "force_client_epochs": None,
+        "resource_orchestrator": True,
     },
 }
 
@@ -643,6 +662,51 @@ def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip, privacy
     for key in aggregated_delta:
         next_params[key] += aggregated_delta[key]
     return next_params, True, aggregated_from, zkip_failures, server_noise_scale
+
+
+def _aggregate_masked_deltas(base_params, deltas_with_sizes, masks_by_client, verify_zkip, zkip,
+                             privacy_config=None, apply_server_dp=False):
+    """Coordinate-wise aggregation for ARPA partial parameter-block uploads."""
+    valid, aggregated_from, zkip_failures = [], [], 0
+    for update in deltas_with_sizes:
+        if len(update) == 5:
+            delta, proof, client_id, data_size, adjusted_weight = update
+        else:
+            delta, proof, client_id, data_size = update
+            adjusted_weight = data_size
+        if delta is None or adjusted_weight <= 0:
+            continue
+        if verify_zkip and not zkip.verify_proof(delta, proof):
+            zkip_failures += 1
+            continue
+        valid.append((delta, float(adjusted_weight), masks_by_client.get(client_id)))
+        aggregated_from.append(client_id)
+    if not valid:
+        return base_params, False, aggregated_from, zkip_failures, 0.0
+
+    aggregated_delta = {key: np.zeros_like(value) for key, value in base_params.items()}
+    for key in aggregated_delta:
+        numerator = np.zeros_like(aggregated_delta[key], dtype=float)
+        denominator = np.zeros_like(aggregated_delta[key], dtype=float)
+        for delta, weight, masks in valid:
+            mask = masks[key] if masks is not None else np.ones_like(delta[key], dtype=bool)
+            numerator += np.where(mask, delta[key], 0.0) * weight
+            denominator += np.where(mask, weight, 0.0)
+        aggregated_delta[key] = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
+    next_params = {key: np.copy(value) for key, value in base_params.items()}
+    server_noise_scale = 0.0
+    if apply_server_dp and privacy_config is not None:
+        aggregated_delta, server_noise_scale = _apply_server_dp_to_delta(aggregated_delta, privacy_config)
+    for key, delta in aggregated_delta.items():
+        next_params[key] += delta
+    return next_params, True, aggregated_from, zkip_failures, server_noise_scale
+
+
+def _parse_upload_ratios(value):
+    ratios = tuple(float(item.strip()) for item in str(value).split(",") if item.strip())
+    if not ratios or any(item <= 0 or item > 1 for item in ratios):
+        raise ValueError("--upload-ratios must contain values in (0, 1]")
+    return ratios
 
 
 class RegulatoryInterventionController:
@@ -1223,6 +1287,43 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
         plt.close()
     if result.get("tcm") is not None:
         export_tcm_checkpoints(output_dir, result["tcm"])
+    if result.get("resource_profiles"):
+        _write_csv(os.path.join(output_dir, "resource_profiles.csv"), result["resource_profiles"])
+    if result.get("resource_trace_records"):
+        _write_csv(os.path.join(output_dir, "resource_trace.csv"), result["resource_trace_records"])
+    if result.get("orchestration_decisions"):
+        _write_csv(os.path.join(output_dir, "orchestration_decisions.csv"), result["orchestration_decisions"])
+    if result.get("partial_update_records"):
+        _write_csv(os.path.join(output_dir, "partial_update_metrics.csv"), result["partial_update_records"])
+        partial_rows = result["partial_update_records"]
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        by_round = {}
+        for row in partial_rows:
+            by_round[row["round"]] = by_round.get(row["round"], 0) + row["uploaded_bytes"]
+        plt.plot(sorted(by_round), [by_round[round_num] for round_num in sorted(by_round)], marker="o")
+        plt.xlabel("Round")
+        plt.ylabel("Uploaded parameter bytes")
+        plt.title("ARPA Partial-update Communication Load")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "partial_update_upload.png"))
+        plt.close()
+    if result.get("resource_trace_records"):
+        selected_rows = [row for row in result["resource_trace_records"] if row.get("status") == "selected"]
+        if selected_rows:
+            completion = {}
+            for row in selected_rows:
+                completion.setdefault(row["round"], []).append(row["predicted_total_seconds"] <= result["resource_deadline_seconds"])
+            plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+            plt.plot(sorted(completion), [np.mean(completion[round_num]) for round_num in sorted(completion)], marker="o")
+            plt.ylim(-0.05, 1.05)
+            plt.xlabel("Round")
+            plt.ylabel("Predicted deadline completion rate")
+            plt.title("ARPA Resource Deadline Completion")
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            charts.save_figure(os.path.join(output_dir, "resource_deadline_completion.png"))
+            plt.close()
 
     charts.plot_global_metrics(result["rounds"], result["accuracies"], result["f1_scores"], result["aucs"])
     charts.save_figure(os.path.join(output_dir, "global_metrics.png"))
@@ -1488,6 +1589,29 @@ def _run_single_method(
     active_indices = list(range(len(clients)))
     current_allocations = _allocate_budget(clients, active_indices, capabilities, config["dynamic_privacy"], privacy_config)
     client_privacy_state = _make_client_privacy_state(clients, args, privacy_config, config) if config["dp_scope"] == "client" else {}
+    resource_simulation_enabled = getattr(args, "heterogeneity_profile", "legacy") == "regulated_generic"
+    arpa_enabled = resource_simulation_enabled and config.get("resource_orchestrator", False)
+    resource_orchestrator = None
+    resource_profiles = []
+    if resource_simulation_enabled:
+        if args.round_deadline_seconds <= 0 or args.reference_batch_seconds <= 0 or args.parameter_blocks <= 0:
+            raise ValueError("ARPA deadline, reference batch duration, and parameter block count must be positive")
+        profiles = build_resource_profiles(len(clients), args.seed)
+        resource_orchestrator = ResourcePrivacyOrchestrator(
+            profiles=profiles,
+            seed=args.seed,
+            deadline_seconds=args.round_deadline_seconds,
+            reference_batch_seconds=args.reference_batch_seconds,
+            upload_ratios=(1.0,) if not arpa_enabled or config.get("force_full_upload", False) else _parse_upload_ratios(args.upload_ratios),
+            block_count=args.parameter_blocks,
+            enforce_tier_coverage=config.get("resource_fairness", True),
+        )
+        resource_profiles = [profile.__dict__.copy() for profile in profiles.values()]
+    residuals = {
+        idx: {key: np.zeros_like(value) for key, value in server.global_model_parameters.items()}
+        for idx in range(len(clients))
+    }
+    previous_risk_actions = {}
     contribution_history = []
 
     result = {
@@ -1557,6 +1681,11 @@ def _run_single_method(
         "final_group_epsilon_gap": 0.0,
         "final_group_participation_gap": 0.0,
         "final_group_quarantine_gap": 0.0,
+        "resource_profiles": resource_profiles,
+        "resource_trace_records": [],
+        "orchestration_decisions": [],
+        "partial_update_records": [],
+        "resource_deadline_seconds": args.round_deadline_seconds if resource_simulation_enabled else None,
     }
 
     print(f"\n=== Running {config['label']} ({method_name}) ===")
@@ -1586,18 +1715,62 @@ def _run_single_method(
         round_noise_multipliers = []
         round_noise_scales = []
         round_delta_norm = 0.0
+        masks_by_client = {}
         available_indices = [idx for idx in range(len(clients)) if not failure_plan[round_num - 1][idx]]
-        selected_indices = set(
-            _select_participants(
-                participation_policy,
-                available_indices,
-                clients,
-                capabilities,
-                contribution_scores,
-                participation_rate,
-                rng,
+        planned_actions = {}
+        if arpa_enabled:
+            target_count = max(1, int(np.ceil(len(available_indices) * participation_rate))) if available_indices else 0
+            quality_scores = {idx: _compute_data_quality_score(client.y_train) for idx, client in enumerate(clients)}
+            planned_actions, trace_rows = resource_orchestrator.plan(
+                round_num=round_num,
+                sample_counts={idx: len(client.y_train) for idx, client in enumerate(clients)},
+                batch_size=privacy_config.dp_batch_size,
+                base_epochs=int(config.get("force_client_epochs") or args.client_epochs),
+                model_bytes=parameter_bytes(global_params),
+                participation_counts=participation_counts,
+                contribution_scores=contribution_scores,
+                quality_scores=quality_scores,
+                privacy_states=client_privacy_state,
+                remaining_rounds=args.num_rounds - round_num + 1,
+                target_count=target_count,
+                risk_actions=previous_risk_actions,
+                eligible_indices=set(available_indices),
             )
-        )
+            selected_indices = set(planned_actions)
+            result["resource_trace_records"].extend(trace_rows)
+            result["orchestration_decisions"].extend(
+                [{"round": round_num, "client_id": clients[idx].client_id, "tier": resource_orchestrator.profiles[idx].tier,
+                  **action.__dict__} for idx, action in planned_actions.items()]
+            )
+        else:
+            if resource_simulation_enabled:
+                fixed_epochs = int(config.get("force_client_epochs") or args.client_epochs)
+                resource_available = []
+                for idx in available_indices:
+                    snapshot = resource_orchestrator.snapshot(idx, round_num)
+                    _, _, total_seconds = resource_orchestrator.predict_seconds(
+                        snapshot, len(clients[idx].y_train), privacy_config.dp_batch_size,
+                        fixed_epochs, 1.0, parameter_bytes(global_params),
+                    )
+                    status = "eligible_static" if snapshot.online and total_seconds <= args.round_deadline_seconds else "deadline_or_offline"
+                    result["resource_trace_records"].append({
+                        **resource_orchestrator._trace_row(snapshot, None, status),
+                        "fixed_epochs": fixed_epochs, "predicted_total_seconds": total_seconds,
+                    })
+                    if status == "eligible_static":
+                        resource_available.append(idx)
+                available_indices = resource_available
+            selected_indices = set(
+                _select_participants(
+                    participation_policy,
+                    available_indices,
+                    clients,
+                    capabilities,
+                    contribution_scores,
+                    participation_rate,
+                    rng,
+                )
+            )
         for selected_idx in selected_indices:
             participation_counts[selected_idx] += 1
 
@@ -1610,14 +1783,16 @@ def _run_single_method(
                 round_noise_multipliers.append(None)
                 continue
 
-            effective_epochs = _effective_epochs(
-                idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config
-            )
+            effective_epochs = _effective_epochs(idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config)
             if config.get("force_client_epochs") is not None:
                 effective_epochs = int(config["force_client_epochs"])
             privacy_state = client_privacy_state.get(idx)
             noise_multiplier = None
-            if privacy_state is not None:
+            if arpa_enabled:
+                action = planned_actions[idx]
+                effective_epochs = action.epochs
+                noise_multiplier = action.noise_multiplier
+            elif privacy_state is not None:
                 noise_multiplier = (
                     _apdp_noise_multiplier(idx, capabilities, participation_counts, privacy_state, privacy_config, round_num)
                     if config["dynamic_privacy"]
@@ -1671,6 +1846,22 @@ def _run_single_method(
                 round_zkip_status.append(False)
                 continue
 
+            if arpa_enabled:
+                action = planned_actions[idx]
+                combined_delta = {key: delta[key] + residuals[idx][key] for key in delta}
+                masks = rotating_block_mask(combined_delta, args.parameter_blocks, action.upload_ratio, idx, round_num)
+                delta = mask_delta(combined_delta, masks)
+                residuals[idx] = {key: combined_delta[key] - delta[key] for key in combined_delta}
+                proof = client.zkip.generate_proof(delta)
+                masks_by_client[client.client_id] = masks
+                uploaded_bytes = sum(int(np.count_nonzero(masks[key])) * np.asarray(delta[key]).dtype.itemsize for key in delta)
+                result["partial_update_records"].append({
+                    "round": round_num, "client_id": client.client_id, "upload_ratio": action.upload_ratio,
+                    "parameter_blocks": args.parameter_blocks, "uploaded_bytes": uploaded_bytes,
+                    "total_parameter_bytes": parameter_bytes(global_params),
+                    "residual_l2": float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in residuals[idx].values()))),
+                })
+
             update_norm = np.sqrt(sum(np.linalg.norm(v.flatten()) ** 2 for v in delta.values()))
             round_update_norms.append(update_norm)
             round_delta_norm += update_norm
@@ -1706,17 +1897,23 @@ def _run_single_method(
                 for delta, proof, client_id, data_size in client_updates
                 if adjusted_weights.get(client_id, data_size) > 0
             ]
+            previous_risk_actions = {
+                int(str(row["client_id"]).split("_")[-1]): row["action"]
+                for row in regulatory_records
+            }
         else:
             adjusted_weights = {client_id: data_size for _, _, client_id, data_size in client_updates}
 
-        server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_deltas(
-            server.global_model_parameters,
-            client_updates,
-            config["use_zkip"],
-            server.zkip,
-            privacy_config=privacy_config,
-            apply_server_dp=config["dp_scope"] == "server",
-        )
+        if arpa_enabled:
+            server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_masked_deltas(
+                server.global_model_parameters, client_updates, masks_by_client, config["use_zkip"], server.zkip,
+                privacy_config=privacy_config, apply_server_dp=config["dp_scope"] == "server",
+            )
+        else:
+            server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_deltas(
+                server.global_model_parameters, client_updates, config["use_zkip"], server.zkip,
+                privacy_config=privacy_config, apply_server_dp=config["dp_scope"] == "server",
+            )
         zkip_failures += regulatory_zkip_failures
         ebcd_alert = 1 if config["use_ebcd"] and server.ebcd.check_for_corruption(server.global_model_parameters) else 0
         if config["use_tcm"]:
@@ -1724,6 +1921,9 @@ def _run_single_method(
                 "method": method_name,
                 "aggregation_successful": aggregation_success,
                 "aggregated_from_clients_count": len(aggregated_from),
+                "arpa_enabled": arpa_enabled,
+                "resource_deadline_seconds": args.round_deadline_seconds if arpa_enabled else None,
+                "partial_update_clients": len(masks_by_client),
             }
             server.tcm.record_state(
                 round_num,
@@ -2796,6 +2996,12 @@ def _ablation_config_overrides(scenario):
         return {"dynamic_privacy": False}
     if scenario == "no_compute_adapter":
         return {"compute_adapter": False}
+    if scenario == "no_resource_orchestration":
+        return {"resource_orchestrator": False}
+    if scenario == "no_partial_updates":
+        return {"force_full_upload": True}
+    if scenario == "no_resource_fairness":
+        return {"resource_fairness": False}
     if scenario == "no_zkip":
         return {"use_zkip": False}
     if scenario == "no_ebcd":

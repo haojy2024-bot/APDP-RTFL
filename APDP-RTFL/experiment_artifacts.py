@@ -238,6 +238,8 @@ _CHART_SOURCES = {
     "privacy_budget_accuracy.png": ("privacy_sensitivity_final_metrics.csv",),
     "privacy_budget_noise.png": ("privacy_sensitivity_final_metrics.csv",),
     "privacy_budget_tradeoff.png": ("privacy_sensitivity_final_metrics.csv",),
+    "resource_deadline_completion.png": ("resource_trace.csv",),
+    "partial_update_upload.png": ("partial_update_metrics.csv",),
 }
 
 

@@ -98,6 +98,16 @@ def parse_args():
                         help="APDP epsilon multiplier for below-average clients.")
     parser.add_argument("--disable-compute-epoch-scaling", action="store_true",
                         help="Disable heterogeneous compute local-epoch scaling while keeping epsilon compensation.")
+    parser.add_argument("--heterogeneity-profile", default="legacy", choices=["legacy", "regulated_generic"],
+                        help="Resource simulation profile. regulated_generic enables ARPA resource/privacy orchestration for APDP-RTFL.")
+    parser.add_argument("--round-deadline-seconds", type=float, default=5.0,
+                        help="Simulated synchronous-round deadline used by the regulated_generic resource profile.")
+    parser.add_argument("--reference-batch-seconds", type=float, default=0.01,
+                        help="Reference simulated processing time for one local mini-batch at unit compute speed.")
+    parser.add_argument("--upload-ratios", default="1.0,0.5,0.25",
+                        help="Comma-separated candidate fractions of parameter blocks uploaded by ARPA clients.")
+    parser.add_argument("--parameter-blocks", type=int, default=8,
+                        help="Number of deterministic parameter blocks used by ARPA partial updates.")
     parser.add_argument("--participation-rate", type=float, default=0.6,
                         help="Client participation ratio for --experiment-suite participation.")
     parser.add_argument("--participation-policies", default="all,random,apdp_score",
@@ -137,7 +147,7 @@ def parse_args():
                         help="Digest algorithm for the audit trace hash chain.")
     parser.add_argument("--ablation-method", default="apdp_rtfl", choices=["apdp_rtfl", "dp_rtfl"],
                         help="Base method for ablation experiments.")
-    parser.add_argument("--ablation-scenarios", default="full,no_adaptive_privacy,no_compute_adapter,no_zkip,no_ebcd,no_tcm,no_regulatory,no_contribution,no_fairness",
+    parser.add_argument("--ablation-scenarios", default="full,no_adaptive_privacy,no_compute_adapter,no_resource_orchestration,no_partial_updates,no_resource_fairness,no_zkip,no_ebcd,no_tcm,no_regulatory,no_contribution,no_fairness",
                         help="Comma-separated ablation scenarios.")
     parser.add_argument("--enable-regulatory-intervention", action="store_true",
                         help="Enable regulatory warning, downweighting, and quarantine in sklearn baseline suites.")
