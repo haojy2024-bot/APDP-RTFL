@@ -95,6 +95,90 @@ class ResourceOrchestratorTests(unittest.TestCase):
         )
         self.assertIn("deadline_infeasible", {row["status"] for row in trace})
 
+    def test_opportunity_aware_privacy_spends_more_for_scarce_windows(self):
+        profiles = build_resource_profiles(2, 11)
+        orchestrator = ResourcePrivacyOrchestrator(profiles, 11, 5.0, 0.001, (1.0,), 4)
+        high_opportunity_state = {"accountant": RDPAccountant(5.0, 1e-5), "base_noise_multiplier": 2.0, "sample_rate": 0.1}
+        low_opportunity_state = {"accountant": RDPAccountant(5.0, 1e-5), "base_noise_multiplier": 2.0, "sample_rate": 0.1}
+        high_opportunity_state["accountant"].spend(0, 1, 0.1, 4.0)
+        low_opportunity_state["accountant"].spend(0, 1, 0.1, 4.0)
+        high_choice = orchestrator._privacy_choice(
+            high_opportunity_state, 5, 20, 0.8, 0.5, "none",
+            expected_opportunities=15.0, budget_utilization=0.2, privacy_boost=1.0,
+            opportunity_compensation=0.0, effective_work_ratio=1.0,
+        )
+        low_choice = orchestrator._privacy_choice(
+            low_opportunity_state, 5, 20, 0.8, 0.5, "none",
+            expected_opportunities=3.0, budget_utilization=0.2, privacy_boost=1.0,
+            opportunity_compensation=0.8, effective_work_ratio=1.0,
+        )
+        self.assertGreater(low_choice[2], high_choice[2])
+
+    def test_trace_includes_explainable_privacy_fields(self):
+        profiles = build_resource_profiles(5, 13)
+        orchestrator = ResourcePrivacyOrchestrator(profiles, 13, 5.0, 0.001, (1.0, 0.5), 4)
+        privacy_states = {
+            idx: {"accountant": RDPAccountant(5.0, 1e-5), "base_noise_multiplier": 3.0, "sample_rate": 0.1}
+            for idx in profiles
+        }
+        actions, trace = orchestrator.plan(
+            round_num=1, sample_counts={idx: 50 for idx in profiles}, batch_size=10, base_epochs=1,
+            model_bytes=512, participation_counts=[0] * 5, contribution_scores={idx: 0.1 for idx in profiles},
+            quality_scores={idx: 0.7 for idx in profiles}, privacy_states=privacy_states,
+            remaining_rounds=10, target_count=3, eligible_indices=set(profiles),
+        )
+        self.assertTrue(actions)
+        selected_rows = [row for row in trace if row["status"] == "selected"]
+        self.assertTrue(selected_rows)
+        for field in (
+            "privacy_budget_target",
+            "expected_future_opportunities",
+            "budget_utilization",
+            "privacy_boost",
+            "opportunity_compensation",
+            "privacy_cap_reason",
+            "selected_noise_reason",
+        ):
+            self.assertIn(field, selected_rows[0])
+
+    def test_low_resource_compensation_can_be_disabled(self):
+        profiles = build_resource_profiles(6, 21)
+        enabled = ResourcePrivacyOrchestrator(
+            profiles, 21, 5.0, 0.001, (1.0, 0.5), 4,
+            enable_low_resource_compensation=True,
+        )
+        disabled = ResourcePrivacyOrchestrator(
+            profiles, 21, 5.0, 0.001, (1.0, 0.5), 4,
+            enable_low_resource_compensation=False,
+        )
+        common_kwargs = dict(
+            round_num=1,
+            sample_counts={idx: 50 for idx in profiles},
+            batch_size=10,
+            base_epochs=1,
+            model_bytes=512,
+            participation_counts=[0] * 6,
+            contribution_scores={idx: 0.1 for idx in profiles},
+            quality_scores={idx: 0.7 for idx in profiles},
+            privacy_states={
+                idx: {"accountant": RDPAccountant(5.0, 1e-5), "base_noise_multiplier": 3.0, "sample_rate": 0.1}
+                for idx in profiles
+            },
+            remaining_rounds=10,
+            target_count=4,
+            eligible_indices=set(profiles),
+        )
+        enabled_actions, _ = enabled.plan(**common_kwargs)
+        disabled_actions, _ = disabled.plan(**{
+            **common_kwargs,
+            "privacy_states": {
+                idx: {"accountant": RDPAccountant(5.0, 1e-5), "base_noise_multiplier": 3.0, "sample_rate": 0.1}
+                for idx in profiles
+            },
+        })
+        self.assertTrue(any(action.opportunity_compensation > 0 for action in enabled_actions.values()))
+        self.assertTrue(all(action.opportunity_compensation == 0 for action in disabled_actions.values()))
+
 
 if __name__ == "__main__":
     unittest.main()

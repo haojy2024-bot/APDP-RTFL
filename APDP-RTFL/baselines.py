@@ -50,6 +50,9 @@ ABLATION_SCENARIOS = (
     "no_resource_orchestration",
     "no_partial_updates",
     "no_resource_fairness",
+    "no_opportunity_privacy",
+    "no_budget_utilization_boost",
+    "no_low_resource_compensation",
     "no_zkip",
     "no_ebcd",
     "no_tcm",
@@ -1215,6 +1218,143 @@ def _select_participants(policy, available_indices, clients, capabilities, contr
     return [idx for _, idx in sorted(scores, reverse=True)[:target_count]]
 
 
+def _client_idx_from_id(client_id):
+    try:
+        return int(str(client_id).split("_")[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _mean_or_nan(values):
+    clean = []
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(numeric):
+            clean.append(numeric)
+    return float(np.mean(clean)) if clean else np.nan
+
+
+def _build_resource_privacy_diagnostics(result, method_name, client_ids):
+    profiles = {int(row["client_idx"]): row for row in result.get("resource_profiles", [])}
+    trace_rows = result.get("resource_trace_records", [])
+    decisions = result.get("orchestration_decisions", [])
+    privacy_rows = result.get("privacy_accounting_records", [])
+    partial_rows = result.get("partial_update_records", [])
+    if not profiles and not trace_rows and not decisions and not privacy_rows:
+        return [], []
+
+    statuses_by_client = {idx: {} for idx in range(len(client_ids))}
+    for row in trace_rows:
+        idx = int(row.get("client_idx", -1))
+        if idx < 0:
+            continue
+        status = row.get("status", "")
+        statuses_by_client.setdefault(idx, {})[status] = statuses_by_client.setdefault(idx, {}).get(status, 0) + 1
+
+    decisions_by_client = {idx: [] for idx in range(len(client_ids))}
+    for row in decisions:
+        idx = _client_idx_from_id(row.get("client_id"))
+        if idx is not None:
+            decisions_by_client.setdefault(idx, []).append(row)
+
+    privacy_by_client = {idx: [] for idx in range(len(client_ids))}
+    for row in privacy_rows:
+        idx = _client_idx_from_id(row.get("client_id"))
+        if idx is not None:
+            privacy_by_client.setdefault(idx, []).append(row)
+
+    partial_by_client = {idx: [] for idx in range(len(client_ids))}
+    for row in partial_rows:
+        idx = _client_idx_from_id(row.get("client_id"))
+        if idx is not None:
+            partial_by_client.setdefault(idx, []).append(row)
+
+    selected_counts = {idx: statuses.get("selected", 0) for idx, statuses in statuses_by_client.items()}
+    max_selected = max(selected_counts.values()) if selected_counts else 0
+    diagnostics = []
+    for idx, client_id in enumerate(client_ids):
+        statuses = statuses_by_client.get(idx, {})
+        selected = statuses.get("selected", 0)
+        not_selected = statuses.get("not_selected", 0)
+        deadline_fail = statuses.get("deadline_infeasible", 0)
+        privacy_fail = statuses.get("privacy_budget_infeasible", 0)
+        unavailable = statuses.get("unavailable", 0)
+        quarantine = statuses.get("quarantine", 0)
+        failure_plan = statuses.get("failure_plan", 0)
+        deadline_denominator = selected + not_selected + deadline_fail
+        eligible_denominator = selected + not_selected + deadline_fail + privacy_fail
+        decision_rows = decisions_by_client.get(idx, [])
+        privacy_client_rows = privacy_by_client.get(idx, [])
+        partial_client_rows = partial_by_client.get(idx, [])
+        latest_privacy = privacy_client_rows[-1] if privacy_client_rows else {}
+        target_epsilon = float(latest_privacy.get("target_epsilon", np.nan)) if latest_privacy else np.nan
+        final_epsilon = float(latest_privacy.get("cumulative_epsilon", 0.0)) if latest_privacy else 0.0
+        diagnostics.append({
+            "method": method_name,
+            "client_id": client_id,
+            "client_idx": idx,
+            "tier": profiles.get(idx, {}).get("tier", ""),
+            "trace_events": sum(statuses.values()),
+            "selected_count": selected,
+            "not_selected_count": not_selected,
+            "deadline_infeasible_count": deadline_fail,
+            "privacy_budget_infeasible_count": privacy_fail,
+            "unavailable_count": unavailable,
+            "quarantine_count": quarantine,
+            "failure_plan_count": failure_plan,
+            "selection_rate": selected / max(1, sum(statuses.values())),
+            "deadline_feasible_rate": (selected + not_selected) / max(1, deadline_denominator),
+            "historical_success_rate": selected / max(1, eligible_denominator),
+            "tier_participation_debt": max_selected - selected,
+            "target_epsilon": target_epsilon,
+            "final_epsilon": final_epsilon,
+            "remaining_epsilon": float(latest_privacy.get("remaining_epsilon", np.nan)) if latest_privacy else np.nan,
+            "epsilon_utilization": final_epsilon / target_epsilon if target_epsilon and np.isfinite(target_epsilon) else np.nan,
+            "spent_events": sum(row.get("status") == "spent" for row in privacy_client_rows),
+            "budget_exhausted_events": sum(row.get("status") == "budget_exhausted" for row in privacy_client_rows),
+            "avg_noise_multiplier": _mean_or_nan([row.get("noise_multiplier") for row in decision_rows]),
+            "avg_incremental_epsilon": _mean_or_nan([row.get("incremental_epsilon") for row in privacy_client_rows]),
+            "avg_privacy_budget_target": _mean_or_nan([row.get("privacy_budget_target") for row in decision_rows]),
+            "avg_expected_future_opportunities": _mean_or_nan([row.get("expected_future_opportunities") for row in decision_rows]),
+            "avg_budget_utilization_at_selection": _mean_or_nan([row.get("budget_utilization") for row in decision_rows]),
+            "avg_privacy_boost": _mean_or_nan([row.get("privacy_boost") for row in decision_rows]),
+            "avg_opportunity_compensation": _mean_or_nan([row.get("opportunity_compensation") for row in decision_rows]),
+            "avg_upload_ratio": _mean_or_nan([row.get("upload_ratio") for row in decision_rows]),
+            "uploaded_bytes": sum(int(row.get("uploaded_bytes", 0)) for row in partial_client_rows),
+            "mean_residual_l2": _mean_or_nan([row.get("residual_l2") for row in partial_client_rows]),
+        })
+
+    tier_summary = []
+    for tier in sorted({row["tier"] for row in diagnostics if row.get("tier")}):
+        rows = [row for row in diagnostics if row.get("tier") == tier]
+        tier_summary.append({
+            "method": method_name,
+            "tier": tier,
+            "client_count": len(rows),
+            "selected_count": sum(row["selected_count"] for row in rows),
+            "deadline_infeasible_count": sum(row["deadline_infeasible_count"] for row in rows),
+            "privacy_budget_infeasible_count": sum(row["privacy_budget_infeasible_count"] for row in rows),
+            "failure_plan_count": sum(row["failure_plan_count"] for row in rows),
+            "avg_selection_rate": _mean_or_nan([row["selection_rate"] for row in rows]),
+            "avg_deadline_feasible_rate": _mean_or_nan([row["deadline_feasible_rate"] for row in rows]),
+            "avg_historical_success_rate": _mean_or_nan([row["historical_success_rate"] for row in rows]),
+            "avg_tier_participation_debt": _mean_or_nan([row["tier_participation_debt"] for row in rows]),
+            "avg_final_epsilon": _mean_or_nan([row["final_epsilon"] for row in rows]),
+            "avg_epsilon_utilization": _mean_or_nan([row["epsilon_utilization"] for row in rows]),
+            "avg_noise_multiplier": _mean_or_nan([row["avg_noise_multiplier"] for row in rows]),
+            "avg_privacy_budget_target": _mean_or_nan([row["avg_privacy_budget_target"] for row in rows]),
+            "avg_opportunity_compensation": _mean_or_nan([row["avg_opportunity_compensation"] for row in rows]),
+            "avg_upload_ratio": _mean_or_nan([row["avg_upload_ratio"] for row in rows]),
+            "uploaded_bytes": sum(row["uploaded_bytes"] for row in rows),
+        })
+    return diagnostics, tier_summary
+
+
 def _save_method_artifacts(output_dir, method_name, result, client_ids):
     os.makedirs(output_dir, exist_ok=True)
     rows = []
@@ -1293,6 +1433,34 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
         _write_csv(os.path.join(output_dir, "resource_trace.csv"), result["resource_trace_records"])
     if result.get("orchestration_decisions"):
         _write_csv(os.path.join(output_dir, "orchestration_decisions.csv"), result["orchestration_decisions"])
+    diagnostics, tier_summary = _build_resource_privacy_diagnostics(result, method_name, client_ids)
+    if diagnostics:
+        _write_csv(os.path.join(output_dir, "resource_privacy_diagnostics.csv"), diagnostics)
+    if tier_summary:
+        _write_csv(os.path.join(output_dir, "tier_privacy_summary.csv"), tier_summary)
+        tiers = [row["tier"] for row in tier_summary]
+        x = np.arange(len(tiers))
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.bar(x, [row["avg_epsilon_utilization"] for row in tier_summary])
+        plt.xticks(x, tiers)
+        plt.ylim(0.0, 1.05)
+        plt.ylabel("Average epsilon utilization")
+        plt.title("ARPA Privacy-budget Utilization by Resource Tier")
+        plt.grid(True, axis="y", alpha=0.3)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "tier_epsilon_utilization.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.bar(x, [row["avg_historical_success_rate"] for row in tier_summary])
+        plt.xticks(x, tiers)
+        plt.ylim(0.0, 1.05)
+        plt.ylabel("Average selected / eligible rate")
+        plt.title("ARPA Effective Participation by Resource Tier")
+        plt.grid(True, axis="y", alpha=0.3)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "tier_effective_participation.png"))
+        plt.close()
     if result.get("partial_update_records"):
         _write_csv(os.path.join(output_dir, "partial_update_metrics.csv"), result["partial_update_records"])
         partial_rows = result["partial_update_records"]
@@ -1595,8 +1763,13 @@ def _run_single_method(
     resource_profiles = []
     if resource_simulation_enabled:
         if (args.round_deadline_seconds <= 0 or args.reference_batch_seconds <= 0
-                or args.parameter_blocks <= 0 or args.arpa_min_initial_privacy_spend <= 0):
-            raise ValueError("ARPA deadline, reference duration, parameter blocks, and initial privacy spend must be positive")
+                or args.parameter_blocks <= 0 or args.arpa_min_initial_privacy_spend <= 0
+                or args.arpa_privacy_boost_gain < 0 or args.arpa_max_privacy_boost < 1
+                or args.arpa_opportunity_compensation_weight < 0):
+            raise ValueError(
+                "ARPA deadline, reference duration, parameter blocks, initial privacy spend, "
+                "privacy boost, and opportunity compensation parameters must be valid"
+            )
         profiles = build_resource_profiles(len(clients), args.seed)
         resource_orchestrator = ResourcePrivacyOrchestrator(
             profiles=profiles,
@@ -1607,6 +1780,12 @@ def _run_single_method(
             block_count=args.parameter_blocks,
             enforce_tier_coverage=config.get("resource_fairness", True),
             minimum_initial_privacy_increment=args.arpa_min_initial_privacy_spend,
+            enable_opportunity_privacy=config.get("opportunity_privacy", True),
+            enable_budget_utilization_boost=config.get("budget_utilization_boost", True),
+            enable_low_resource_compensation=config.get("low_resource_compensation", True),
+            privacy_boost_gain=args.arpa_privacy_boost_gain,
+            max_privacy_boost=args.arpa_max_privacy_boost,
+            opportunity_compensation_weight=args.arpa_opportunity_compensation_weight,
         )
         resource_profiles = [profile.__dict__.copy() for profile in profiles.values()]
     residuals = {
@@ -3004,6 +3183,12 @@ def _ablation_config_overrides(scenario):
         return {"force_full_upload": True}
     if scenario == "no_resource_fairness":
         return {"resource_fairness": False}
+    if scenario == "no_opportunity_privacy":
+        return {"opportunity_privacy": False}
+    if scenario == "no_budget_utilization_boost":
+        return {"budget_utilization_boost": False}
+    if scenario == "no_low_resource_compensation":
+        return {"low_resource_compensation": False}
     if scenario == "no_zkip":
         return {"use_zkip": False}
     if scenario == "no_ebcd":

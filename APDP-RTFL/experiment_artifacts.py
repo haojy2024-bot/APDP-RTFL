@@ -240,6 +240,8 @@ _CHART_SOURCES = {
     "privacy_budget_tradeoff.png": ("privacy_sensitivity_final_metrics.csv",),
     "resource_deadline_completion.png": ("resource_trace.csv",),
     "partial_update_upload.png": ("partial_update_metrics.csv",),
+    "tier_epsilon_utilization.png": ("tier_privacy_summary.csv", "resource_privacy_diagnostics.csv"),
+    "tier_effective_participation.png": ("tier_privacy_summary.csv", "resource_privacy_diagnostics.csv"),
 }
 
 
