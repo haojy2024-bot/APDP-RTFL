@@ -1,6 +1,0 @@
-method,client_id,target_epsilon,final_epsilon,remaining_epsilon,spent_events,budget_exhausted_events
-apdp_rtfl,client_0,5.0,5.0,0.0,2,0
-apdp_rtfl,client_1,5.0,5.0,0.0,2,0
-apdp_rtfl,client_2,5.0,5.0,0.0,2,0
-apdp_rtfl,client_3,5.0,5.0,0.0,2,0
-apdp_rtfl,client_4,5.0,5.0,0.0,2,0

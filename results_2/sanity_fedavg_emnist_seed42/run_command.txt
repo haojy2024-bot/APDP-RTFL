@@ -1,1 +1,0 @@
-APDP-RTFL/main.py --experiment-suite baselines --methods fedavg --run-name sanity_fedavg_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --failure-prob 0 --backend sklearn --seed 42
