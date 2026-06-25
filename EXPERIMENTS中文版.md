@@ -24,11 +24,45 @@ python APDP-RTFL/main.py <arguments>
 
 将 `--heterogeneity-profile regulated_generic` 用于启用 ARPA-RTFL。该模式以可复现的受限、标准、高性能三档资源画像模拟计算吞吐、上行带宽、RTT 与在线波动；在不改变每客户端总 RDP 账本的前提下，联合选择本地 epoch、参数块上传比例和 DP-SGD 噪声。不要把此模拟表述为真实行业设备实测。
 
+当前 ARPA-RTFL 的资源—隐私编排包含三项核心机制：
+
+1. **机会感知隐私支出调度**：不再使用简单的 `remaining_epsilon / remaining_rounds` 均摊策略，而是根据客户端未来有效参与机会、数据质量、历史贡献、监管风险和全局预算利用率决定本轮 DP-SGD 噪声乘子。低算力客户端不会被直接映射为更低隐私支出；若其未来可参与窗口较少且处于合规状态，系统会在其成功参与时给予更有效的预算支出。
+2. **deadline slack 感知的部分参数上传**：full upload 若具有足够 deadline 裕量则保持完整上传；若 full upload 虽可行但过于贴近 deadline，则自动选择 `0.5` 或 `0.25` 参数块比例，以恢复安全时延裕量。该机制用于通信压力下的适配，而不是为了制造压缩效果而无条件降低上传量。
+3. **残差感知误差反馈**：未上传参数块的残差会保留到客户端本地。若残差压力超过阈值且 full upload 仍满足 deadline，系统会触发 `residual_feedback_full_upload`，优先完整上传一次以释放误差反馈，降低长期部分更新对模型精度的损伤。
+
 ```powershell
-python APDP-RTFL/main.py --experiment-suite baselines --methods apdp_rtfl --run-name arpa_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --backend sklearn --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --seed 42
+python APDP-RTFL/main.py --experiment-suite baselines --methods apdp_rtfl --run-name arpa_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --backend sklearn --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
 ```
 
-每个 ARPA 运行额外输出 `resource_profiles.csv`、`resource_trace.csv`、`orchestration_decisions.csv` 和 `partial_update_metrics.csv`。消融时使用 `no_resource_orchestration`、`no_partial_updates`、`no_resource_fairness`，并与 `no_adaptive_privacy`、`no_regulatory` 一同报告。
+关键参数说明：
+
+| 参数 | 含义 | 建议默认值 |
+| --- | --- | --- |
+| `--round-deadline-seconds` | 每轮同步训练的模拟 deadline | `5` |
+| `--reference-batch-seconds` | 单位算力处理一个 mini-batch 的参考时长 | `0.01` |
+| `--parameter-blocks` | 线性模型参数块数量 | `8` |
+| `--upload-ratios` | 候选参数块上传比例 | `1.0,0.5,0.25` |
+| `--arpa-privacy-boost-gain` | 预算利用率落后时的隐私支出 boost 强度 | `0.8` |
+| `--arpa-max-privacy-boost` | 预算利用率 boost 上限 | `1.8` |
+| `--arpa-opportunity-compensation-weight` | 低未来参与机会的隐私支出补偿权重 | `0.65` |
+| `--arpa-compression-slack-target` | full upload 超过 deadline 该比例时尝试部分上传 | `0.85` |
+| `--arpa-residual-full-upload-threshold` | 残差压力超过该值时优先完整上传 | `0.25` |
+
+每个 ARPA 运行额外输出：
+
+| 输出文件 | 用途 |
+| --- | --- |
+| `resource_profiles.csv` | 每个客户端的资源层级、算力、带宽、RTT 和在线概率。 |
+| `resource_trace.csv` | 每轮每客户端的资源状态、deadline/privacy 可行性和选择状态。 |
+| `orchestration_decisions.csv` | 被选客户端的 epoch、上传比例、噪声乘子、预算目标、机会补偿、deadline slack 和上传选择原因。 |
+| `partial_update_metrics.csv` | 部分参数上传比例、真实参数覆盖率、残差压力、残差前后 L2 范数和是否触发误差反馈 full upload。 |
+| `resource_privacy_diagnostics.csv` | 客户端级资源—隐私诊断，包括 epsilon 利用率、有效参与率、deadline 可行率、平均噪声和残差压力。 |
+| `tier_privacy_summary.csv` | 按 constrained、standard、high 三档资源层汇总 epsilon 利用率、有效参与率、上传比例和残差反馈次数。 |
+| `tier_epsilon_utilization.png` | 各资源层平均 epsilon 利用率图。 |
+| `tier_effective_participation.png` | 各资源层有效参与率图。 |
+| `tier_upload_ratio.png` | 各资源层平均上传比例图。 |
+
+报告 ARPA 结果时，至少同时给出 balanced accuracy、macro-F1、平均 epsilon 利用率、低资源层有效参与率、deadline 达成率、平均上传比例和残差反馈次数。若 APDP-RTFL 未优于 DP 基线，应按预设协议报告，不得通过提高 APDP 的总隐私预算或放宽其资源条件获取优势。
 
 ## 1. DP 基线对照
 
@@ -124,16 +158,30 @@ python APDP-RTFL/main.py --experiment-suite audit_trace --audit-methods apdp_rtf
 所有消融情景必须使用同一组随机种子，并报告相对于 `full` 的绝对变化和相对变化。
 
 ```powershell
-python APDP-RTFL/main.py --experiment-suite ablation --ablation-method apdp_rtfl --ablation-scenarios full,no_adaptive_privacy,no_compute_adapter,no_zkip,no_ebcd,no_tcm,no_regulatory,no_contribution,no_fairness --run-name ablation_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --total-privacy-budget 5 --backend sklearn --seed 42
+python APDP-RTFL/main.py --experiment-suite ablation --ablation-method apdp_rtfl --ablation-scenarios full,no_adaptive_privacy,no_compute_adapter,no_resource_orchestration,no_partial_updates,no_resource_fairness,no_opportunity_privacy,no_budget_utilization_boost,no_low_resource_compensation,no_zkip,no_ebcd,no_tcm,no_regulatory,no_contribution,no_fairness --run-name ablation_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 50 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --backend sklearn --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --seed 42
 ```
 
 主要输出包括 `ablation_final_metrics.csv`、`ablation_summary.csv`、`ablation_accuracy.png`、`ablation_macro_f1.png`、`ablation_balanced_accuracy.png` 和 `ablation_accuracy_delta.png`。
+
+新增 ARPA 相关消融解释如下：
+
+| 消融场景 | 移除内容 | 主要观察指标 |
+| --- | --- | --- |
+| `no_resource_orchestration` | 移除资源—隐私联合编排路径 | balanced accuracy、deadline 达成率、慢节点参与率 |
+| `no_partial_updates` | 强制 full upload，移除参数块部分更新 | 上传字节数、deadline 达成率、精度 |
+| `no_resource_fairness` | 移除资源层轮换覆盖约束 | constrained/standard/high 参与差距 |
+| `no_opportunity_privacy` | 移除未来有效参与机会感知预算调度 | epsilon 利用率、低资源层噪声乘子、精度 |
+| `no_budget_utilization_boost` | 移除预算利用率闭环 boost | 最终 epsilon 利用率、收敛速度、精度 |
+| `no_low_resource_compensation` | 移除低未来参与机会客户端的隐私支出补偿 | constrained 层 epsilon 利用率与有效参与率 |
+
+消融报告不应只比较最终 accuracy。应同时报告 `tier_privacy_summary.csv` 中的资源层 epsilon 利用率、有效参与率、上传比例和残差反馈次数，以说明性能变化是否来自低资源客户端被重新纳入有效训练。
 
 ## 论文结果矩阵建议
 
 | 论文问题 | 主要实验套件 | 最低报告指标 |
 | --- | --- | --- |
 | DP 效用与隐私权衡 | `baselines` | Accuracy、Macro-F1、Balanced Accuracy、适用时的 AUC、噪声尺度、运行时间 |
+| 资源—隐私联合编排 | `baselines` + `heterogeneity_profile=regulated_generic` | 资源层 epsilon 利用率、deadline 达成率、上传比例、残差反馈次数、慢节点有效参与率 |
 | 及时监管干预 | 启用干预的 `baselines` | 预警数、降权数、隔离数、效用变化 |
 | 数据污染识别 | `pollution` | 识别率、假阳性、假阴性、攻击下的模型效用 |
 | 合成群体公平性 | `synthetic_fairness` | 最差群体准确率、Accuracy/F1 差距、epsilon 差距、参与差距 |
@@ -163,8 +211,61 @@ python APDP-RTFL/aggregate_results.py --input-root results --run-pattern baselin
 
 该脚本还会生成带均值和样本标准差误差线的 `aggregate_<metric>.png` 图。其他实验套件只需将 `--input-file` 改为对应的最终指标文件，例如 `pollution_final_metrics.csv`、`ablation_final_metrics.csv` 或 `privacy_sensitivity_final_metrics.csv`，并指定独立的汇总输出目录。
 
+ARPA-RTFL 的资源层诊断需要单独汇总。该脚本读取每个运行目录下的 `apdp_rtfl/tier_privacy_summary.csv` 和 `apdp_rtfl/resource_privacy_diagnostics.csv`；若输入是消融实验目录，也会递归读取 `scenario/apdp_rtfl/` 下的诊断文件：
+
+```powershell
+python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern arpa_emnist_seed* --output-dir results/arpa_emnist_diagnostics_aggregate --title-prefix "EMNIST ARPA Diagnostics"
+```
+
+正式验收时建议加入 `--require-complete`，使任何缺少 `tier_privacy_summary.csv` 的运行目录都会导致汇总失败，避免旧格式或失败运行被静默跳过：
+
+```powershell
+python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern arpa_emnist_seed* --require-complete --output-dir results/arpa_emnist_diagnostics_aggregate_strict --title-prefix "EMNIST ARPA Diagnostics"
+```
+
+主要输出包括：
+
+| 输出文件 | 用途 |
+| --- | --- |
+| `arpa_tier_seed_metrics.csv` | 每个原始运行目录、每个资源层一行，保留 seed、scenario、method 和 tier。 |
+| `arpa_tier_metric_summary.csv` | 长表形式的资源层指标均值、标准差和样本数。 |
+| `arpa_tier_paper_table.csv` | 宽表形式，可直接整理为论文机制诊断表。 |
+| `arpa_client_seed_diagnostics.csv` | 合并后的客户端级资源—隐私诊断明细。 |
+| `aggregate_tier_<metric>_<scenario>.png` | 各资源层指标的均值和标准差图。 |
+
+默认汇总指标包括 `avg_epsilon_utilization`、`avg_historical_success_rate`、`avg_deadline_feasible_rate`、`avg_noise_multiplier`、`avg_upload_ratio`、`avg_residual_pressure`、`compressed_selection_count` 和 `residual_feedback_full_upload_count`。若只关注论文主文中的核心治理指标，可显式指定：
+
+```powershell
+python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern arpa_emnist_seed* --metrics avg_epsilon_utilization,avg_historical_success_rate,avg_upload_ratio,residual_feedback_full_upload_count --output-dir results/arpa_emnist_diagnostics_core --title-prefix "EMNIST ARPA Core Diagnostics"
+```
+
+如果只关注低资源层，可使用 `--tiers constrained`；如果输入目录是消融实验，可用 `--scenario-filter full,no_partial_updates` 只汇总指定场景：
+
+```powershell
+python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern ablation_emnist_seed* --scenario-filter full,no_partial_updates,no_opportunity_privacy --tiers constrained --output-dir results/arpa_ablation_constrained_diagnostics --title-prefix "Constrained-tier ARPA Ablation"
+```
+
 默认汇总指标为最终 Accuracy、Macro-F1、Balanced Accuracy、AUC、平均每轮时间和平均 DP 噪声尺度。当表格目的更聚焦时，可指定所需指标：
 
 ```powershell
 python APDP-RTFL/aggregate_results.py --input-root results --run-pattern pollution_label_flip_seed* --input-file pollution_final_metrics.csv --metrics final_accuracy,final_f1_score,detection_rate,false_positive_rate,false_negative_rate --output-dir results/pollution_label_flip_aggregate --title-prefix "Label-Flipping Detection"
 ```
+
+## 9. ARPA 单次运行验收检查
+
+完成包含 APDP-RTFL 与 DP 基线的方法对照后，可使用验收脚本检查该运行是否满足预设条件。该脚本不会改变原始训练产物，只在独立输出目录中写入检查表。
+
+```powershell
+python APDP-RTFL/validate_arpa_acceptance.py --run-dir results/baseline_emnist_seed42_YYYYmmdd_HHMMSS --metric final_balanced_accuracy --baselines dp_fl,dp_flprox,dp_fedsgd,ldp_fl,dp_rtfl --min-epsilon-utilization 0.70 --min-constrained-success-rate 0.50 --max-deadline-failure-rate 0.20 --output-dir results/baseline_emnist_seed42_acceptance
+```
+
+验收项包括：
+
+| 验收项 | 含义 |
+| --- | --- |
+| `beats_present_baselines` | APDP-RTFL 在指定主指标上是否超过当前运行中实际存在的 DP 基线。 |
+| `avg_tier_epsilon_utilization` | 各资源层平均 epsilon 利用率是否达到阈值。 |
+| `constrained_effective_participation` | constrained 层有效参与率是否达到阈值。 |
+| `predicted_deadline_failure_rate` | 被选客户端的预测 deadline 失败率是否低于阈值。 |
+
+输出文件包括 `arpa_acceptance_checks.csv`、`arpa_baseline_comparisons.csv` 和 `arpa_acceptance_summary.json`。正式验收可加 `--strict`，要求 `apdp_rtfl/tier_privacy_summary.csv` 与 `apdp_rtfl/resource_trace.csv` 必须存在。
