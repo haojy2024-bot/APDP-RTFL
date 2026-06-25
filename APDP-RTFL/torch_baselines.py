@@ -33,6 +33,7 @@ from baselines import (
 from data_utils import load_experiment_data, split_data_for_clients
 from fl_server import FLServer
 from experiment_artifacts import write_data_artifacts, write_artifact_manifest
+from privacy_accounting import RDPAccountant, calibrate_noise_multiplier
 
 
 class TorchLinearClient:
@@ -44,6 +45,8 @@ class TorchLinearClient:
         num_features,
         classes,
         device,
+        X_val=None,
+        y_val=None,
         learning_rate=BASE_LEARNING_RATE,
         batch_size=256,
         random_state=0,
@@ -52,6 +55,8 @@ class TorchLinearClient:
         self.client_id = client_id
         self.X_train = np.asarray(X_train, dtype=np.float32)
         self.y_train = np.asarray(y_train, dtype=int)
+        self.X_val = None if X_val is None else np.asarray(X_val, dtype=np.float32)
+        self.y_val = None if y_val is None else np.asarray(y_val, dtype=int)
         self.num_features = num_features
         self.classes = np.asarray(classes, dtype=int)
         self.n_classes = len(self.classes)
@@ -63,6 +68,7 @@ class TorchLinearClient:
         self.dp_epsilon = privacy_config.dp_epsilon
         self.dp_delta = privacy_config.dp_delta
         self.dp_l2_norm_clip = privacy_config.dp_l2_norm_clip
+        self.dp_batch_size = int(privacy_config.dp_batch_size)
         self.model = torch.nn.Linear(num_features, self.n_classes).to(device)
         torch.manual_seed(random_state)
         with torch.no_grad():
@@ -73,6 +79,7 @@ class TorchLinearClient:
         self.zkip = ZeroKnowledgeIntegrityProofs()
         self.last_val_acc_gain = 0.0
         self.last_val_loss_drop = 0.0
+        self.last_privacy_event = None
 
     def model_parameters(self):
         with torch.no_grad():
@@ -104,9 +111,87 @@ class TorchLinearClient:
             noisy[key] = clipped + np.random.normal(0, noise_stddev, size=value.shape)
         return noisy
 
-    def train(self, global_params, epochs, use_dp=True, fedprox_mu=0.0):
+    def _make_generator(self, offset=0):
+        try:
+            generator = torch.Generator(device=self.device)
+        except TypeError:
+            generator = torch.Generator()
+        generator.manual_seed(int(self.random_state) + int(offset))
+        return generator
+
+    def _train_with_dp_sgd(self, global_params, epochs, fedprox_mu, accountant, noise_multiplier, round_num):
+        n_samples = len(self.y_train)
+        if n_samples == 0:
+            return None, None
+        if accountant is None or noise_multiplier is None:
+            raise ValueError("DP-SGD requires both an RDP accountant and a noise multiplier.")
+
+        batch_size = min(max(1, int(self.dp_batch_size)), n_samples)
+        sample_rate = batch_size / n_samples
+        steps = int(epochs) * int(np.ceil(n_samples / batch_size))
+        event = accountant.spend(round_num or 0, steps, sample_rate, noise_multiplier)
+        self.last_privacy_event = event
+        if event.status != "spent":
+            return None, None
+
+        self.set_global_model_parameters(global_params)
+        global_weight = torch.tensor(global_params["coef_"], dtype=torch.float32, device=self.device)
+        global_bias = torch.tensor(global_params["intercept_"], dtype=torch.float32, device=self.device)
+        X = torch.tensor(self.X_train, dtype=torch.float32, device=self.device)
+        y = torch.tensor(self._encode_y(self.y_train), dtype=torch.long, device=self.device)
+        weight = self.model.weight
+        bias = self.model.bias
+        generator = self._make_generator(10007 * int(round_num or 1))
+        noise_std = float(noise_multiplier) * float(self.dp_l2_norm_clip)
+
+        with torch.no_grad():
+            for _ in range(int(epochs)):
+                for _ in range(int(np.ceil(n_samples / batch_size))):
+                    selected = torch.rand(n_samples, device=self.device, generator=generator) < sample_rate
+                    if not bool(selected.any().item()):
+                        selected[torch.randint(n_samples, (1,), device=self.device, generator=generator)] = True
+                    X_batch = X[selected]
+                    y_batch = y[selected]
+                    logits = torch.nn.functional.linear(X_batch, weight, bias)
+                    probabilities = torch.softmax(logits, dim=1)
+                    residual = probabilities
+                    residual[torch.arange(y_batch.shape[0], device=self.device), y_batch] -= 1.0
+                    grad_w_each = residual[:, :, None] * X_batch[:, None, :]
+                    grad_b_each = residual
+                    norms = torch.sqrt(
+                        grad_w_each.square().sum(dim=(1, 2)) + grad_b_each.square().sum(dim=1)
+                    )
+                    scales = torch.clamp(float(self.dp_l2_norm_clip) / (norms + 1e-12), max=1.0)
+                    denominator = max(1, int(y_batch.shape[0]))
+                    grad_w = (grad_w_each * scales[:, None, None]).mean(dim=0)
+                    grad_b = (grad_b_each * scales[:, None]).mean(dim=0)
+                    grad_w = grad_w + torch.randn(grad_w.shape, device=self.device, generator=generator) * (noise_std / denominator)
+                    grad_b = grad_b + torch.randn(grad_b.shape, device=self.device, generator=generator) * (noise_std / denominator)
+                    if fedprox_mu > 0:
+                        grad_w = grad_w + fedprox_mu * (weight - global_weight)
+                        grad_b = grad_b + fedprox_mu * (bias - global_bias)
+                    weight -= self.learning_rate * grad_w
+                    bias -= self.learning_rate * grad_b
+
+        current_params = self.model_parameters()
+        delta = {key: current_params[key] - global_params[key] for key in current_params}
+        proof = self.zkip.generate_proof(delta)
+        return delta, proof
+
+    def train(self, global_params, epochs, use_dp=True, fedprox_mu=0.0,
+              privacy_accountant=None, noise_multiplier=None, round_num=None):
         if self.X_train.shape[0] == 0:
             return None, None
+        self.last_privacy_event = None
+        if use_dp and noise_multiplier is not None:
+            return self._train_with_dp_sgd(
+                global_params,
+                epochs,
+                fedprox_mu,
+                privacy_accountant,
+                noise_multiplier,
+                round_num,
+            )
         self.set_global_model_parameters(global_params)
         global_weight = torch.tensor(global_params["coef_"], dtype=torch.float32, device=self.device)
         global_bias = torch.tensor(global_params["intercept_"], dtype=torch.float32, device=self.device)
@@ -198,7 +283,7 @@ def _resolve_device(device_arg):
 
 def _init_torch_clients(train_val_data, num_features, classes, device, args, privacy_config):
     clients = []
-    for i, (X_train, y_train, _, _) in enumerate(train_val_data):
+    for i, (X_train, y_train, X_val, y_val) in enumerate(train_val_data):
         clients.append(
             TorchLinearClient(
                 f"client_{i}",
@@ -207,6 +292,8 @@ def _init_torch_clients(train_val_data, num_features, classes, device, args, pri
                 num_features,
                 classes,
                 device,
+                X_val=X_val,
+                y_val=y_val,
                 learning_rate=BASE_LEARNING_RATE,
                 batch_size=args.torch_batch_size,
                 random_state=args.seed + i,
@@ -214,6 +301,41 @@ def _init_torch_clients(train_val_data, num_features, classes, device, args, pri
             )
         )
     return clients
+
+
+def _make_client_privacy_state(clients, args, privacy_config, config):
+    state = {}
+    for idx, client in enumerate(clients):
+        n_samples = max(1, len(client.y_train))
+        batch_size = min(privacy_config.dp_batch_size, n_samples)
+        sample_rate = batch_size / n_samples
+        epochs = int(config.get("force_client_epochs") or args.client_epochs)
+        planned_steps = args.num_rounds * epochs * int(np.ceil(n_samples / batch_size))
+        base_sigma = calibrate_noise_multiplier(
+            sample_rate,
+            planned_steps,
+            privacy_config.epsilon_per_client_total,
+            privacy_config.dp_delta,
+        )
+        if config.get("dynamic_privacy"):
+            base_sigma *= privacy_config.adaptive_increase_factor
+        state[idx] = {
+            "accountant": RDPAccountant(privacy_config.epsilon_per_client_total, privacy_config.dp_delta),
+            "base_noise_multiplier": base_sigma,
+            "sample_rate": sample_rate,
+        }
+    return state
+
+
+def _apdp_noise_multiplier(idx, capabilities, participation_counts, state, privacy_config, round_num):
+    base = state["base_noise_multiplier"]
+    if round_num <= privacy_config.apdp_warmup_rounds:
+        return base
+    median_capability = float(np.median(list(capabilities.values()))) if capabilities else 1.0
+    median_participation = float(np.median(participation_counts)) if participation_counts else 0.0
+    rewarded = capabilities.get(idx, 1.0) >= median_capability or participation_counts[idx] <= median_participation
+    factor = privacy_config.adaptive_increase_factor if rewarded else privacy_config.adaptive_decrease_factor
+    return base / factor
 
 
 def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, classes, failure_plan, output_dir, device, privacy_config):
@@ -230,6 +352,8 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
 
     active_indices = list(range(len(clients)))
     current_allocations = _allocate_budget(clients, active_indices, capabilities, config["dynamic_privacy"], privacy_config)
+    client_privacy_state = _make_client_privacy_state(clients, args, privacy_config, config) if config["dp_scope"] == "client" else {}
+    participation_counts = [0 for _ in clients]
     contribution_history = []
     result = {
         "method": method_name,
@@ -253,6 +377,8 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
         "per_client_ebcd_stats": [],
         "per_client_zkip_status": [],
         "per_client_epsilon": [],
+        "per_client_noise_multiplier": [],
+        "privacy_accounting_records": [],
         "tcm": server.tcm,
     }
 
@@ -268,6 +394,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
         round_ebcd_stats = []
         round_zkip_status = []
         round_epsilons = []
+        round_noise_multipliers = []
         round_noise_scales = []
         round_delta_norm = 0.0
 
@@ -276,24 +403,55 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
                 round_update_norms.append(None)
                 round_ebcd_stats.append((None, None, None))
                 round_zkip_status.append(None)
-                round_epsilons.append(None)
+                round_epsilons.append(client_privacy_state[idx]["accountant"].epsilon if idx in client_privacy_state else None)
+                round_noise_multipliers.append(None)
                 continue
+            participation_counts[idx] += 1
 
             base_epsilon = current_allocations.get(idx, privacy_config.dp_epsilon)
             effective_epsilon = _adjust_epsilon_for_compute(
                 base_epsilon, idx, capabilities, config["compute_adapter"], privacy_config
             )
             client.dp_epsilon = max(privacy_config.min_epsilon, min(privacy_config.max_epsilon, effective_epsilon))
-            round_epsilons.append(client.dp_epsilon)
             effective_epochs = _effective_epochs(
                 idx, args.client_epochs, capabilities, config["compute_adapter"], privacy_config
             )
+            if config.get("force_client_epochs") is not None:
+                effective_epochs = int(config["force_client_epochs"])
+            privacy_state = client_privacy_state.get(idx)
+            noise_multiplier = None
+            if privacy_state is not None:
+                noise_multiplier = (
+                    _apdp_noise_multiplier(idx, capabilities, participation_counts, privacy_state, privacy_config, round_num)
+                    if config["dynamic_privacy"]
+                    else privacy_state["base_noise_multiplier"]
+                )
+            round_noise_multipliers.append(noise_multiplier)
             delta, proof = client.train(
                 global_params=global_params,
                 epochs=effective_epochs,
                 use_dp=config["dp_scope"] == "client",
                 fedprox_mu=args.fedprox_mu if config["fedprox"] else 0.0,
+                privacy_accountant=privacy_state["accountant"] if privacy_state is not None else None,
+                noise_multiplier=noise_multiplier,
+                round_num=round_num,
             )
+            if privacy_state is not None and client.last_privacy_event is not None:
+                event = client.last_privacy_event
+                result["privacy_accounting_records"].append({
+                    "method": method_name,
+                    "client_id": client.client_id,
+                    "round": round_num,
+                    "steps": event.steps,
+                    "sample_rate": event.sample_rate,
+                    "noise_multiplier": event.noise_multiplier,
+                    "cumulative_epsilon": event.epsilon,
+                    "incremental_epsilon": event.incremental_epsilon,
+                    "target_epsilon": privacy_config.epsilon_per_client_total,
+                    "remaining_epsilon": privacy_state["accountant"].remaining_epsilon,
+                    "status": event.status,
+                })
+            round_epsilons.append(privacy_state["accountant"].epsilon if privacy_state is not None else None)
             if delta is None:
                 round_update_norms.append(None)
                 round_ebcd_stats.append((None, None, None))
@@ -308,8 +466,8 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
             zkip_ok = server.zkip.verify_proof(delta, proof) if config["use_zkip"] else True
             round_zkip_status.append(zkip_ok)
             client_updates.append((delta, proof, client.client_id, len(client.y_train)))
-            if config["dp_scope"] == "client" and client.dp_epsilon > 0:
-                noise_stddev = (client.dp_l2_norm_clip * np.sqrt(2 * np.log(1.25 / client.dp_delta))) / client.dp_epsilon
+            if noise_multiplier is not None:
+                noise_stddev = noise_multiplier * client.dp_l2_norm_clip / max(1, min(privacy_config.dp_batch_size, len(client.y_train)))
             else:
                 noise_stddev = 0.0
             round_noise_scales.append(noise_stddev)
@@ -364,6 +522,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
         result["per_client_ebcd_stats"].append(round_ebcd_stats)
         result["per_client_zkip_status"].append(round_zkip_status)
         result["per_client_epsilon"].append(round_epsilons)
+        result["per_client_noise_multiplier"].append(round_noise_multipliers)
         contribution_history.append({idx: round_update_norms[idx] or 0.0 for idx in range(len(clients))})
 
         print(

@@ -19,6 +19,8 @@ def parse_args():
     parser.add_argument("--method", default="apdp_rtfl", help="Method name to validate.")
     parser.add_argument("--baselines", default=DEFAULT_BASELINES, help="Comma-separated baseline method names.")
     parser.add_argument("--metric", default=DEFAULT_METRIC, help="Final metric used for baseline win checks.")
+    parser.add_argument("--min-win-margin", type=float, default=0.0, help="Minimum required APDP minus baseline metric margin.")
+    parser.add_argument("--require-all-baselines", action="store_true", help="Fail if any requested baseline is missing.")
     parser.add_argument("--min-epsilon-utilization", type=float, default=0.70, help="Minimum average tier epsilon utilization.")
     parser.add_argument("--min-constrained-success-rate", type=float, default=0.50, help="Minimum constrained-tier effective participation rate.")
     parser.add_argument("--max-deadline-failure-rate", type=float, default=0.20, help="Maximum selected-row predicted deadline failure rate.")
@@ -120,20 +122,32 @@ def validate_run(args):
 
     checks = []
     comparison_rows = []
-    for baseline in _parse_csv_list(args.baselines):
+    requested_baselines = _parse_csv_list(args.baselines)
+    for baseline in requested_baselines:
         baseline_value = metric_values.get(baseline, math.nan)
         present = not math.isnan(baseline_value)
-        passed = present and not math.isnan(method_value) and method_value > baseline_value
+        margin = method_value - baseline_value if present and not math.isnan(method_value) else math.nan
+        passed = present and not math.isnan(margin) and margin >= args.min_win_margin
         comparison_rows.append({
             "method": args.method,
             "baseline": baseline,
             "metric": args.metric,
             "method_value": method_value,
             "baseline_value": baseline_value,
+            "margin": margin,
+            "min_win_margin": args.min_win_margin,
             "baseline_present": present,
             "passed": passed if present else "",
         })
     present_comparisons = [row for row in comparison_rows if row["baseline_present"]]
+    missing_baselines = [row["baseline"] for row in comparison_rows if not row["baseline_present"]]
+    checks.append({
+        "check": "requested_baselines_present",
+        "value": len(requested_baselines) - len(missing_baselines),
+        "threshold": len(requested_baselines),
+        "passed": (not args.require_all_baselines) or not missing_baselines,
+        "details": ",".join(missing_baselines),
+    })
     checks.append({
         "check": "beats_present_baselines",
         "value": sum(row["passed"] is True for row in present_comparisons),

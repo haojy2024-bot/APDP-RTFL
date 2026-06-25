@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import kurtosis, skew, entropy
 from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from data_utils import load_experiment_data, split_data_for_clients
@@ -607,6 +607,42 @@ def _init_clients(train_val_data, num_features, classes, seed, privacy_config):
     return clients
 
 
+def _init_backend_clients(train_val_data, num_features, classes, args, privacy_config):
+    backend = getattr(args, "backend", "sklearn")
+    if backend == "sklearn":
+        return _init_clients(train_val_data, num_features, classes, args.seed, privacy_config), "sklearn", None
+    if backend != "torch":
+        raise ValueError(f"Unsupported backend: {backend}")
+    try:
+        from torch_baselines import TorchLinearClient, _resolve_device
+    except ImportError as exc:
+        raise RuntimeError(
+            "The torch backend requires PyTorch. Install a CUDA-enabled PyTorch build "
+            "on the experiment server, or rerun with --backend sklearn."
+        ) from exc
+
+    device = _resolve_device(args.device)
+    clients = []
+    for i, (X_train, y_train, X_val, y_val) in enumerate(train_val_data):
+        clients.append(
+            TorchLinearClient(
+                f"client_{i}",
+                X_train,
+                y_train,
+                num_features,
+                classes,
+                device,
+                X_val=X_val,
+                y_val=y_val,
+                learning_rate=BASE_LEARNING_RATE,
+                batch_size=args.torch_batch_size,
+                random_state=args.seed + i,
+                privacy_config=privacy_config,
+            )
+        )
+    return clients, "torch", device
+
+
 def _dp_noise_stddev(privacy_config, epsilon=None):
     effective_epsilon = privacy_config.dp_epsilon if epsilon is None else epsilon
     if effective_epsilon <= 0:
@@ -809,12 +845,84 @@ def _make_eval_server(method_name, client_ids, num_features, classes, params):
     return server
 
 
+def _evaluate_softmax_params(params, X_eval, y_eval, classes):
+    if X_eval is None or y_eval is None or len(y_eval) == 0:
+        return {}
+    class_values = np.asarray(classes, dtype=int)
+    logits = np.asarray(X_eval, dtype=np.float32) @ np.asarray(params["coef_"], dtype=np.float32).T
+    logits = logits + np.asarray(params["intercept_"], dtype=np.float32)
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    exp_logits = np.exp(logits)
+    probas = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+    predictions = class_values[np.argmax(probas, axis=1)]
+    average = "binary" if len(class_values) <= 2 else "macro"
+    y_classes = np.unique(y_eval)
+    pred_classes = np.unique(predictions)
+    if len(y_classes) < 2 or len(pred_classes) < 2:
+        f1 = np.nan
+        precision = np.nan
+        recall = np.nan
+        auc_roc = np.nan
+    else:
+        f1 = f1_score(y_eval, predictions, average=average, zero_division=0)
+        precision = precision_score(y_eval, predictions, average=average, zero_division=0)
+        recall = recall_score(y_eval, predictions, average=average, zero_division=0)
+        try:
+            if len(class_values) <= 2:
+                positive_index = 1 if probas.shape[1] > 1 else 0
+                auc_roc = roc_auc_score(y_eval, probas[:, positive_index])
+            elif len(y_classes) < len(class_values):
+                auc_roc = np.nan
+            else:
+                auc_roc = roc_auc_score(y_eval, probas, multi_class="ovr", average="macro", labels=class_values)
+        except ValueError:
+            auc_roc = np.nan
+    return {
+        "accuracy": accuracy_score(y_eval, predictions),
+        "balanced_accuracy": balanced_accuracy_score(y_eval, predictions),
+        "f1_score": f1,
+        "precision": precision,
+        "recall": recall,
+        "auc_roc": auc_roc,
+    }
+
+
+def _evaluate_global_params(method_name, client_ids, num_features, classes, params, X_test, y_test, round_num, backend):
+    if backend == "torch":
+        metrics = _evaluate_softmax_params(params, X_test, y_test, classes)
+        pred_classes = np.unique(
+            np.asarray(classes, dtype=int)[
+                np.argmax(
+                    np.asarray(X_test, dtype=np.float32) @ np.asarray(params["coef_"], dtype=np.float32).T
+                    + np.asarray(params["intercept_"], dtype=np.float32),
+                    axis=1,
+                )
+            ]
+        ) if X_test.shape[0] else []
+        print(f"[Round {round_num}] y_test classes: {np.unique(y_test)}, predictions classes: {pred_classes}")
+        return metrics
+    eval_server = _make_eval_server(method_name, client_ids, num_features, classes, params)
+    return eval_server.evaluate_global_model(X_test, y_test, round_num)
+
+
 def _evaluate_params_on_client(params, client, classes, num_features):
     X_eval = client.X_val if client.X_val is not None and client.X_val.shape[0] > 0 else None
     y_eval = client.y_val if client.y_val is not None and len(client.y_val) > 0 else None
     if X_eval is None or y_eval is None or len(np.unique(y_eval)) < 2:
         return None
     class_values = np.asarray(classes, dtype=int)
+    if np.asarray(params["coef_"]).shape[0] == len(class_values):
+        try:
+            metrics = _evaluate_softmax_params(params, X_eval, y_eval, classes)
+            return {
+                "validation_size": len(y_eval),
+                "local_accuracy": metrics.get("accuracy", np.nan),
+                "local_balanced_accuracy": metrics.get("balanced_accuracy", np.nan),
+                "local_f1_score": metrics.get("f1_score", np.nan),
+                "local_auc_roc": metrics.get("auc_roc", np.nan),
+            }
+        except Exception:
+            return None
     param_classes = 1 if len(class_values) <= 2 else len(class_values)
     model = SGDClassifier(loss="log_loss")
     model.coef_ = np.zeros((param_classes, num_features))
@@ -1772,13 +1880,22 @@ def _run_single_method(
     if config_overrides:
         config.update(config_overrides)
     num_features = X_test.shape[1]
-    clients = _init_clients(train_val_data, num_features, classes, args.seed, privacy_config)
+    clients, backend, backend_device = _init_backend_clients(train_val_data, num_features, classes, args, privacy_config)
     client_ids = [client.client_id for client in clients]
     capabilities = capability_overrides if capability_overrides is not None else _assign_capabilities(len(clients))
     for i, client in enumerate(clients):
         client.compute_capability = capabilities.get(i, 1.0)
 
     server = FLServer(f"{method_name}_server", client_ids, num_features, classes=classes)
+    if backend == "torch":
+        server.global_model_parameters = (
+            {key: np.copy(value) for key, value in clients[0].model_parameters().items()}
+            if clients
+            else {
+                "coef_": np.zeros((len(classes), num_features), dtype=np.float32),
+                "intercept_": np.zeros(len(classes), dtype=np.float32),
+            }
+        )
     if config["use_ebcd"]:
         initial_params = [client.model_parameters() for client in clients if client.X_train.shape[0] > 0]
         if initial_params:
@@ -1831,7 +1948,9 @@ def _run_single_method(
 
     result = {
         "method": method_name,
-        "label": f"{config['label']}{label_suffix}",
+        "label": f"{config['label']}{label_suffix}" if backend == "sklearn" else f"{config['label']}{label_suffix} (torch)",
+        "backend": backend,
+        "device": str(backend_device) if backend_device is not None else "",
         "reference": config.get("reference", ""),
         "participation_policy": participation_policy,
         "ablation_scenario": ablation_scenario or "",
@@ -1903,7 +2022,8 @@ def _run_single_method(
         "resource_deadline_seconds": args.round_deadline_seconds if resource_simulation_enabled else None,
     }
 
-    print(f"\n=== Running {config['label']} ({method_name}) ===")
+    backend_description = f", backend={backend}" + (f", device={backend_device}" if backend_device is not None else "")
+    print(f"\n=== Running {config['label']} ({method_name}{backend_description}) ===")
     rng = np.random.default_rng(args.seed + 5000)
     contribution_scores = {idx: 0.0 for idx in range(len(clients))}
     regulatory_controller = None
@@ -2161,6 +2281,8 @@ def _run_single_method(
                 "aggregation_successful": aggregation_success,
                 "aggregated_from_clients_count": len(aggregated_from),
                 "arpa_enabled": arpa_enabled,
+                "backend": backend,
+                "device": str(backend_device) if backend_device is not None else None,
                 "resource_deadline_seconds": args.round_deadline_seconds if arpa_enabled else None,
                 "partial_update_clients": len(masks_by_client),
             }
@@ -2171,8 +2293,17 @@ def _run_single_method(
                 {cid: "OK" for cid in aggregated_from},
             )
 
-        eval_server = _make_eval_server(method_name, client_ids, num_features, classes, server.global_model_parameters)
-        metrics = eval_server.evaluate_global_model(X_test, y_test, round_num)
+        metrics = _evaluate_global_params(
+            method_name,
+            client_ids,
+            num_features,
+            classes,
+            server.global_model_parameters,
+            X_test,
+            y_test,
+            round_num,
+            backend,
+        )
         duration = time.time() - start_time
         valid_norms = [n for n in round_update_norms if n is not None]
         avg_delta_norm = round_delta_norm / len(valid_norms) if valid_norms else 0.0
