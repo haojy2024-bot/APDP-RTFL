@@ -242,6 +242,7 @@ _CHART_SOURCES = {
     "partial_update_upload.png": ("partial_update_metrics.csv",),
     "tier_epsilon_utilization.png": ("tier_privacy_summary.csv", "resource_privacy_diagnostics.csv"),
     "tier_effective_participation.png": ("tier_privacy_summary.csv", "resource_privacy_diagnostics.csv"),
+    "tier_upload_ratio.png": ("tier_privacy_summary.csv", "partial_update_metrics.csv"),
 }
 
 

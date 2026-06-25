@@ -138,6 +138,7 @@ class ResourceOrchestratorTests(unittest.TestCase):
             "opportunity_compensation",
             "privacy_cap_reason",
             "selected_noise_reason",
+            "residual_pressure",
         ):
             self.assertIn(field, selected_rows[0])
 
@@ -178,6 +179,41 @@ class ResourceOrchestratorTests(unittest.TestCase):
         })
         self.assertTrue(any(action.opportunity_compensation > 0 for action in enabled_actions.values()))
         self.assertTrue(all(action.opportunity_compensation == 0 for action in disabled_actions.values()))
+
+    def test_upload_ratio_compresses_only_when_deadline_slack_is_tight(self):
+        profiles = build_resource_profiles(3, 31)
+        orchestrator = ResourcePrivacyOrchestrator(
+            profiles, 31, 10.0, 0.001, (1.0, 0.5, 0.25), 4,
+            compression_slack_target=0.85,
+        )
+        safe, safe_reason = orchestrator._choose_upload_candidate([
+            {"ratio": 1.0, "comp": 1.0, "comm": 1.0, "total": 2.0},
+            {"ratio": 0.5, "comp": 1.0, "comm": 0.5, "total": 1.5},
+        ])
+        self.assertEqual(safe["ratio"], 1.0)
+        self.assertEqual(safe_reason, "full_upload_with_safe_slack")
+
+        compressed, compressed_reason = orchestrator._choose_upload_candidate([
+            {"ratio": 1.0, "comp": 8.0, "comm": 1.5, "total": 9.5},
+            {"ratio": 0.5, "comp": 8.0, "comm": 0.4, "total": 8.4},
+            {"ratio": 0.25, "comp": 8.0, "comm": 0.2, "total": 8.2},
+        ])
+        self.assertEqual(compressed["ratio"], 0.5)
+        self.assertEqual(compressed_reason, "compressed_to_restore_deadline_slack")
+
+    def test_residual_pressure_prefers_full_upload_when_feasible(self):
+        profiles = build_resource_profiles(3, 32)
+        orchestrator = ResourcePrivacyOrchestrator(
+            profiles, 32, 10.0, 0.001, (1.0, 0.5, 0.25), 4,
+            compression_slack_target=0.85,
+            residual_full_upload_threshold=0.25,
+        )
+        selected, reason = orchestrator._choose_upload_candidate([
+            {"ratio": 1.0, "comp": 8.0, "comm": 1.5, "total": 9.5},
+            {"ratio": 0.5, "comp": 8.0, "comm": 0.4, "total": 8.4},
+        ], residual_pressure=0.4)
+        self.assertEqual(selected["ratio"], 1.0)
+        self.assertEqual(reason, "residual_feedback_full_upload")
 
 
 if __name__ == "__main__":

@@ -53,6 +53,9 @@ class PlannedAction:
     opportunity_compensation: float
     privacy_cap_reason: str
     selected_noise_reason: str
+    deadline_slack_ratio: float
+    upload_selection_reason: str
+    residual_pressure: float
     utility_score: float
 
 
@@ -120,7 +123,8 @@ class ResourcePrivacyOrchestrator:
                  enforce_tier_coverage: bool = True, minimum_initial_privacy_increment: float = 0.25,
                  enable_opportunity_privacy: bool = True, enable_budget_utilization_boost: bool = True,
                  enable_low_resource_compensation: bool = True, privacy_boost_gain: float = 0.8,
-                 max_privacy_boost: float = 1.8, opportunity_compensation_weight: float = 0.65):
+                 max_privacy_boost: float = 1.8, opportunity_compensation_weight: float = 0.65,
+                 compression_slack_target: float = 0.85, residual_full_upload_threshold: float = 0.25):
         self.profiles = profiles
         self.seed = seed
         self.deadline_seconds = float(deadline_seconds)
@@ -135,12 +139,18 @@ class ResourcePrivacyOrchestrator:
         self.privacy_boost_gain = float(privacy_boost_gain)
         self.max_privacy_boost = float(max_privacy_boost)
         self.opportunity_compensation_weight = float(opportunity_compensation_weight)
+        self.compression_slack_target = float(compression_slack_target)
+        self.residual_full_upload_threshold = float(residual_full_upload_threshold)
         if self.minimum_initial_privacy_increment <= 0:
             raise ValueError("minimum_initial_privacy_increment must be positive")
         if self.privacy_boost_gain < 0 or self.max_privacy_boost < 1.0:
             raise ValueError("privacy boost gain must be non-negative and max boost must be at least 1")
         if self.opportunity_compensation_weight < 0:
             raise ValueError("opportunity compensation weight must be non-negative")
+        if not 0 < self.compression_slack_target <= 1:
+            raise ValueError("compression slack target must be in (0, 1]")
+        if not 0 <= self.residual_full_upload_threshold <= 1:
+            raise ValueError("residual full-upload threshold must be in [0, 1]")
 
     def snapshot(self, client_idx: int, round_num: int) -> ResourceSnapshot:
         profile = self.profiles[client_idx]
@@ -202,12 +212,32 @@ class ResourcePrivacyOrchestrator:
                                 selection_probability: float) -> float:
         return float(max(0.25, remaining_rounds * availability * deadline_probability * selection_probability))
 
+    def _choose_upload_candidate(self, feasible: list[dict[str, float]], residual_pressure: float = 0.0) -> tuple[dict[str, float], str]:
+        """Pick full upload when safe; compress only when deadline slack is tight."""
+        full_candidates = [item for item in feasible if abs(item["ratio"] - 1.0) < 1e-12]
+        if full_candidates:
+            full = min(full_candidates, key=lambda item: item["total"])
+            if full["total"] <= self.deadline_seconds * self.compression_slack_target:
+                return full, "full_upload_with_safe_slack"
+            if residual_pressure >= self.residual_full_upload_threshold:
+                return full, "residual_feedback_full_upload"
+        safe_candidates = [
+            item for item in feasible
+            if item["total"] <= self.deadline_seconds * self.compression_slack_target
+        ]
+        if safe_candidates:
+            # Use the least compression that restores a safe deadline margin.
+            return max(safe_candidates, key=lambda item: (item["ratio"], -item["total"])), "compressed_to_restore_deadline_slack"
+        return min(feasible, key=lambda item: (item["total"], -item["ratio"])), "compressed_best_effort_deadline"
+
     def plan(self, round_num: int, sample_counts: dict[int, int], batch_size: int, base_epochs: int,
              model_bytes: int, participation_counts: list[int], contribution_scores: dict[int, float],
              quality_scores: dict[int, float], privacy_states: dict[int, Any], remaining_rounds: int,
              target_count: int, risk_actions: dict[int, str] | None = None,
-             eligible_indices: set[int] | None = None) -> tuple[dict[int, PlannedAction], list[dict[str, Any]]]:
+             eligible_indices: set[int] | None = None,
+             residual_pressures: dict[int, float] | None = None) -> tuple[dict[int, PlannedAction], list[dict[str, Any]]]:
         risk_actions = risk_actions or {}
+        residual_pressures = residual_pressures or {}
         candidates, trace = {}, []
         slack_values, debt_values = {}, {}
         budget_utilization = self._budget_utilization(privacy_states)
@@ -250,55 +280,68 @@ class ResourcePrivacyOrchestrator:
             privacy_rejected = False
             for epochs in range(int(base_epochs), 0, -1):
                 chosen = None
+                feasible_uploads = []
                 for ratio in self.upload_ratios:
                     comp, comm, total = self.predict_seconds(snapshot, sample_counts[idx], batch_size, epochs, ratio, model_bytes)
                     if total > self.deadline_seconds:
                         continue
                     deadline_feasible = True
-                    steps = epochs * int(np.ceil(max(1, sample_counts[idx]) / max(1, batch_size)))
-                    if self.enable_low_resource_compensation:
-                        opportunity_compensation = float(
-                            np.clip(1.0 - opportunity_values[idx] / max(max_opportunities, 1e-9), 0.0, 1.0)
-                        )
-                    else:
-                        opportunity_compensation = 0.0
-                    effective_work_ratio = float(np.clip((epochs * ratio) / max(1, base_epochs), 0.15, 1.0))
-                    privacy_choice = self._privacy_choice(
-                        state,
-                        steps,
-                        remaining_rounds,
-                        quality_scores.get(idx, 0.0),
-                        contribution_scores.get(idx, 0.0),
-                        risk_action,
-                        expected_opportunities=opportunity_values[idx],
-                        budget_utilization=budget_utilization,
-                        privacy_boost=privacy_boost,
-                        opportunity_compensation=opportunity_compensation,
-                        effective_work_ratio=effective_work_ratio,
+                    feasible_uploads.append({"ratio": ratio, "comp": comp, "comm": comm, "total": total})
+                if not feasible_uploads:
+                    continue
+                residual_pressure = float(np.clip(residual_pressures.get(idx, 0.0), 0.0, 1.0))
+                upload_choice, upload_reason = self._choose_upload_candidate(feasible_uploads, residual_pressure=residual_pressure)
+                ratio = upload_choice["ratio"]
+                comp = upload_choice["comp"]
+                comm = upload_choice["comm"]
+                total = upload_choice["total"]
+                deadline_feasible = True
+                steps = epochs * int(np.ceil(max(1, sample_counts[idx]) / max(1, batch_size)))
+                if self.enable_low_resource_compensation:
+                    opportunity_compensation = float(
+                        np.clip(1.0 - opportunity_values[idx] / max(max_opportunities, 1e-9), 0.0, 1.0)
                     )
-                    noise, spend, target, cap_reason, noise_reason = privacy_choice
-                    if state is not None and noise is None:
-                        privacy_rejected = True
-                        continue
-                    chosen = PlannedAction(
-                        idx,
-                        epochs,
-                        ratio,
-                        noise,
-                        comp,
-                        comm,
-                        total,
-                        spend,
-                        target,
-                        opportunity_values[idx],
-                        budget_utilization,
-                        privacy_boost,
-                        opportunity_compensation,
-                        cap_reason,
-                        noise_reason,
-                        0.0,
-                    )
-                    break
+                else:
+                    opportunity_compensation = 0.0
+                effective_work_ratio = float(np.clip((epochs * ratio) / max(1, base_epochs), 0.15, 1.0))
+                privacy_choice = self._privacy_choice(
+                    state,
+                    steps,
+                    remaining_rounds,
+                    quality_scores.get(idx, 0.0),
+                    contribution_scores.get(idx, 0.0),
+                    risk_action,
+                    expected_opportunities=opportunity_values[idx],
+                    budget_utilization=budget_utilization,
+                    privacy_boost=privacy_boost,
+                    opportunity_compensation=opportunity_compensation,
+                    effective_work_ratio=effective_work_ratio,
+                )
+                noise, spend, target, cap_reason, noise_reason = privacy_choice
+                if state is not None and noise is None:
+                    privacy_rejected = True
+                    continue
+                chosen = PlannedAction(
+                    idx,
+                    epochs,
+                    ratio,
+                    noise,
+                    comp,
+                    comm,
+                    total,
+                    spend,
+                    target,
+                    opportunity_values[idx],
+                    budget_utilization,
+                    privacy_boost,
+                    opportunity_compensation,
+                    cap_reason,
+                    noise_reason,
+                    max(0.0, (self.deadline_seconds - total) / max(self.deadline_seconds, 1e-9)),
+                    upload_reason,
+                    residual_pressure,
+                    0.0,
+                )
                 if chosen is not None:
                     candidates[idx] = chosen
                     slack_values[idx] = max(0.0, self.deadline_seconds - chosen.predicted_total_seconds)
@@ -396,6 +439,9 @@ class ResourcePrivacyOrchestrator:
                         "opportunity_compensation": action.opportunity_compensation,
                         "privacy_cap_reason": action.privacy_cap_reason,
                         "selected_noise_reason": action.selected_noise_reason,
+                        "deadline_slack_ratio": action.deadline_slack_ratio,
+                        "upload_selection_reason": action.upload_selection_reason,
+                        "residual_pressure": action.residual_pressure,
                         "predicted_compute_seconds": action.predicted_compute_seconds,
                         "predicted_communication_seconds": action.predicted_communication_seconds,
                         "predicted_total_seconds": action.predicted_total_seconds, "utility_score": action.utility_score})

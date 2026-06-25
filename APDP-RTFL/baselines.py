@@ -1325,8 +1325,19 @@ def _build_resource_privacy_diagnostics(result, method_name, client_ids):
             "avg_privacy_boost": _mean_or_nan([row.get("privacy_boost") for row in decision_rows]),
             "avg_opportunity_compensation": _mean_or_nan([row.get("opportunity_compensation") for row in decision_rows]),
             "avg_upload_ratio": _mean_or_nan([row.get("upload_ratio") for row in decision_rows]),
+            "avg_deadline_slack_ratio": _mean_or_nan([row.get("deadline_slack_ratio") for row in decision_rows]),
+            "avg_residual_pressure": _mean_or_nan([row.get("residual_pressure") for row in decision_rows]),
+            "compressed_selection_count": sum(
+                row.get("upload_selection_reason") in {"compressed_to_restore_deadline_slack", "compressed_best_effort_deadline"}
+                for row in decision_rows
+            ),
+            "safe_full_upload_count": sum(row.get("upload_selection_reason") == "full_upload_with_safe_slack" for row in decision_rows),
+            "residual_feedback_full_upload_count": sum(row.get("upload_selection_reason") == "residual_feedback_full_upload" for row in decision_rows),
             "uploaded_bytes": sum(int(row.get("uploaded_bytes", 0)) for row in partial_client_rows),
+            "avg_uploaded_parameter_fraction": _mean_or_nan([row.get("uploaded_parameter_fraction") for row in partial_client_rows]),
+            "avg_residual_l2_before": _mean_or_nan([row.get("residual_l2_before") for row in partial_client_rows]),
             "mean_residual_l2": _mean_or_nan([row.get("residual_l2") for row in partial_client_rows]),
+            "avg_residual_l2_after": _mean_or_nan([row.get("residual_l2_after") for row in partial_client_rows]),
         })
 
     tier_summary = []
@@ -1350,6 +1361,14 @@ def _build_resource_privacy_diagnostics(result, method_name, client_ids):
             "avg_privacy_budget_target": _mean_or_nan([row["avg_privacy_budget_target"] for row in rows]),
             "avg_opportunity_compensation": _mean_or_nan([row["avg_opportunity_compensation"] for row in rows]),
             "avg_upload_ratio": _mean_or_nan([row["avg_upload_ratio"] for row in rows]),
+            "avg_deadline_slack_ratio": _mean_or_nan([row["avg_deadline_slack_ratio"] for row in rows]),
+            "avg_residual_pressure": _mean_or_nan([row["avg_residual_pressure"] for row in rows]),
+            "compressed_selection_count": sum(row["compressed_selection_count"] for row in rows),
+            "safe_full_upload_count": sum(row["safe_full_upload_count"] for row in rows),
+            "residual_feedback_full_upload_count": sum(row["residual_feedback_full_upload_count"] for row in rows),
+            "avg_uploaded_parameter_fraction": _mean_or_nan([row["avg_uploaded_parameter_fraction"] for row in rows]),
+            "avg_residual_l2_before": _mean_or_nan([row["avg_residual_l2_before"] for row in rows]),
+            "avg_residual_l2_after": _mean_or_nan([row["avg_residual_l2_after"] for row in rows]),
             "uploaded_bytes": sum(row["uploaded_bytes"] for row in rows),
         })
     return diagnostics, tier_summary
@@ -1460,6 +1479,17 @@ def _save_method_artifacts(output_dir, method_name, result, client_ids):
         plt.grid(True, axis="y", alpha=0.3)
         plt.tight_layout()
         charts.save_figure(os.path.join(output_dir, "tier_effective_participation.png"))
+        plt.close()
+
+        plt.figure(figsize=charts.FIGSIZE_DEFAULT)
+        plt.bar(x, [row["avg_upload_ratio"] for row in tier_summary])
+        plt.xticks(x, tiers)
+        plt.ylim(0.0, 1.05)
+        plt.ylabel("Average upload ratio")
+        plt.title("ARPA Partial-update Ratio by Resource Tier")
+        plt.grid(True, axis="y", alpha=0.3)
+        plt.tight_layout()
+        charts.save_figure(os.path.join(output_dir, "tier_upload_ratio.png"))
         plt.close()
     if result.get("partial_update_records"):
         _write_csv(os.path.join(output_dir, "partial_update_metrics.csv"), result["partial_update_records"])
@@ -1765,7 +1795,9 @@ def _run_single_method(
         if (args.round_deadline_seconds <= 0 or args.reference_batch_seconds <= 0
                 or args.parameter_blocks <= 0 or args.arpa_min_initial_privacy_spend <= 0
                 or args.arpa_privacy_boost_gain < 0 or args.arpa_max_privacy_boost < 1
-                or args.arpa_opportunity_compensation_weight < 0):
+                or args.arpa_opportunity_compensation_weight < 0
+                or not 0 < args.arpa_compression_slack_target <= 1
+                or not 0 <= args.arpa_residual_full_upload_threshold <= 1):
             raise ValueError(
                 "ARPA deadline, reference duration, parameter blocks, initial privacy spend, "
                 "privacy boost, and opportunity compensation parameters must be valid"
@@ -1786,6 +1818,8 @@ def _run_single_method(
             privacy_boost_gain=args.arpa_privacy_boost_gain,
             max_privacy_boost=args.arpa_max_privacy_boost,
             opportunity_compensation_weight=args.arpa_opportunity_compensation_weight,
+            compression_slack_target=args.arpa_compression_slack_target,
+            residual_full_upload_threshold=args.arpa_residual_full_upload_threshold,
         )
         resource_profiles = [profile.__dict__.copy() for profile in profiles.values()]
     residuals = {
@@ -1902,6 +1936,14 @@ def _run_single_method(
         if arpa_enabled:
             target_count = max(1, int(np.ceil(len(available_indices) * participation_rate))) if available_indices else 0
             quality_scores = {idx: _compute_data_quality_score(client.y_train) for idx, client in enumerate(clients)}
+            model_norm = float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in global_params.values())))
+            residual_pressures = {
+                idx: (
+                    float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in residuals[idx].values())))
+                    / max(1e-12, model_norm + float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in residuals[idx].values()))))
+                )
+                for idx in range(len(clients))
+            }
             planned_actions, trace_rows = resource_orchestrator.plan(
                 round_num=round_num,
                 sample_counts={idx: len(client.y_train) for idx, client in enumerate(clients)},
@@ -1916,6 +1958,7 @@ def _run_single_method(
                 target_count=target_count,
                 risk_actions=previous_risk_actions,
                 eligible_indices=set(available_indices),
+                residual_pressures=residual_pressures,
             )
             selected_indices = set(planned_actions)
             result["resource_trace_records"].extend(trace_rows)
@@ -2029,18 +2072,33 @@ def _run_single_method(
 
             if arpa_enabled:
                 action = planned_actions[idx]
+                residual_l2_before = float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in residuals[idx].values())))
                 combined_delta = {key: delta[key] + residuals[idx][key] for key in delta}
+                combined_delta_l2 = float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in combined_delta.values())))
                 masks = rotating_block_mask(combined_delta, args.parameter_blocks, action.upload_ratio, idx, round_num)
                 delta = mask_delta(combined_delta, masks)
                 residuals[idx] = {key: combined_delta[key] - delta[key] for key in combined_delta}
+                residual_l2_after = float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in residuals[idx].values())))
                 proof = client.zkip.generate_proof(delta)
                 masks_by_client[client.client_id] = masks
+                uploaded_parameters = sum(int(np.count_nonzero(masks[key])) for key in delta)
+                total_parameters = sum(int(np.asarray(delta[key]).size) for key in delta)
                 uploaded_bytes = sum(int(np.count_nonzero(masks[key])) * np.asarray(delta[key]).dtype.itemsize for key in delta)
                 result["partial_update_records"].append({
                     "round": round_num, "client_id": client.client_id, "upload_ratio": action.upload_ratio,
                     "parameter_blocks": args.parameter_blocks, "uploaded_bytes": uploaded_bytes,
                     "total_parameter_bytes": parameter_bytes(global_params),
-                    "residual_l2": float(np.sqrt(sum(np.linalg.norm(value) ** 2 for value in residuals[idx].values()))),
+                    "uploaded_parameters": uploaded_parameters,
+                    "total_parameters": total_parameters,
+                    "uploaded_parameter_fraction": uploaded_parameters / max(1, total_parameters),
+                    "deadline_slack_ratio": action.deadline_slack_ratio,
+                    "upload_selection_reason": action.upload_selection_reason,
+                    "residual_pressure": action.residual_pressure,
+                    "residual_l2_before": residual_l2_before,
+                    "combined_delta_l2": combined_delta_l2,
+                    "residual_l2": residual_l2_after,
+                    "residual_l2_after": residual_l2_after,
+                    "residual_feedback_full_upload": action.upload_selection_reason == "residual_feedback_full_upload",
                 })
 
             update_norm = np.sqrt(sum(np.linalg.norm(v.flatten()) ** 2 for v in delta.values()))

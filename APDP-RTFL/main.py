@@ -116,6 +116,10 @@ def parse_args():
                         help="Maximum multiplicative ARPA privacy-spend boost from the utilization controller.")
     parser.add_argument("--arpa-opportunity-compensation-weight", type=float, default=0.65,
                         help="Weight for increasing ARPA privacy spend when a compliant client has scarce future opportunities.")
+    parser.add_argument("--arpa-compression-slack-target", type=float, default=0.85,
+                        help="Use partial parameter uploads when full upload is feasible but exceeds this fraction of the round deadline.")
+    parser.add_argument("--arpa-residual-full-upload-threshold", type=float, default=0.25,
+                        help="If residual pressure exceeds this threshold, prefer full upload when it remains deadline-feasible.")
     parser.add_argument("--participation-rate", type=float, default=0.6,
                         help="Client participation ratio for --experiment-suite participation.")
     parser.add_argument("--participation-policies", default="all,random,apdp_score",
