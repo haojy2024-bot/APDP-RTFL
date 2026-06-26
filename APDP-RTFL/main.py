@@ -421,35 +421,34 @@ def main():
         run_baseline_suite(args, output_dir)
         return
     if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution", "audit_trace", "ablation"}:
-        if args.backend == "torch":
-            if args.experiment_suite != "baselines":
-                raise NotImplementedError("Torch backend currently supports --experiment-suite baselines. Use --backend sklearn for participation/privacy_sensitivity/pollution/fairness/synthetic_fairness/contribution/audit_trace/ablation suites.")
-            if args.heterogeneity_profile == "regulated_generic":
-                from baselines import run_baseline_suite
-                run_baseline_suite(args, output_dir)
-            else:
-                from torch_baselines import run_torch_baseline_suite
-                run_torch_baseline_suite(args, output_dir)
+        if args.backend == "torch" and args.experiment_suite == "baselines" and args.heterogeneity_profile != "regulated_generic":
+            from torch_baselines import run_torch_baseline_suite
+            run_torch_baseline_suite(args, output_dir)
+            return
+        if args.backend == "torch" and args.experiment_suite != "baselines" and args.heterogeneity_profile != "regulated_generic":
+            raise NotImplementedError(
+                "Torch backend for paper experiment suites requires --heterogeneity-profile regulated_generic "
+                "so CUDA client training stays on the full ARPA orchestration path."
+            )
+        from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite, run_fairness_suite, run_synthetic_fairness_suite, run_contribution_suite, run_audit_trace_suite, run_ablation_suite
+        if args.experiment_suite == "baselines":
+            run_baseline_suite(args, output_dir)
+        elif args.experiment_suite == "participation":
+            run_participation_suite(args, output_dir)
+        elif args.experiment_suite == "privacy_sensitivity":
+            run_privacy_sensitivity_suite(args, output_dir)
+        elif args.experiment_suite == "pollution":
+            run_pollution_injection_suite(args, output_dir)
+        elif args.experiment_suite == "fairness":
+            run_fairness_suite(args, output_dir)
+        elif args.experiment_suite == "synthetic_fairness":
+            run_synthetic_fairness_suite(args, output_dir)
+        elif args.experiment_suite == "contribution":
+            run_contribution_suite(args, output_dir)
+        elif args.experiment_suite == "audit_trace":
+            run_audit_trace_suite(args, output_dir)
         else:
-            from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite, run_fairness_suite, run_synthetic_fairness_suite, run_contribution_suite, run_audit_trace_suite, run_ablation_suite
-            if args.experiment_suite == "baselines":
-                run_baseline_suite(args, output_dir)
-            elif args.experiment_suite == "participation":
-                run_participation_suite(args, output_dir)
-            elif args.experiment_suite == "privacy_sensitivity":
-                run_privacy_sensitivity_suite(args, output_dir)
-            elif args.experiment_suite == "pollution":
-                run_pollution_injection_suite(args, output_dir)
-            elif args.experiment_suite == "fairness":
-                run_fairness_suite(args, output_dir)
-            elif args.experiment_suite == "synthetic_fairness":
-                run_synthetic_fairness_suite(args, output_dir)
-            elif args.experiment_suite == "contribution":
-                run_contribution_suite(args, output_dir)
-            elif args.experiment_suite == "audit_trace":
-                run_audit_trace_suite(args, output_dir)
-            else:
-                run_ablation_suite(args, output_dir)
+            run_ablation_suite(args, output_dir)
         return
     if args.backend == "torch":
         from torch_baselines import run_torch_baseline_suite
