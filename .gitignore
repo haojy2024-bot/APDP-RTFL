@@ -7,6 +7,16 @@ logs/
 save/
 data/
 APDP-RTFL/data/
+.agents/
+.codex/
+.vscode/
+_render_problem_formulation_revised/
+_render_related_word_2_polished/
+_tmp_render/
+_tmp_render_work/
+_tmp_render_work_elevated/
+figure-studio-runs/
+tools/
 results/
 results_2/
 results_3/
