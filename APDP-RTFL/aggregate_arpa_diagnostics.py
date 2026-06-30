@@ -1,4 +1,4 @@
-"""Aggregate ARPA resource/privacy diagnostics across independent runs.
+"""Aggregate GRAIL-FL resource/privacy diagnostics across independent runs.
 
 This script complements aggregate_results.py.  It focuses on mechanism
 evidence such as tier-level epsilon utilization, effective participation,
@@ -27,20 +27,20 @@ DEFAULT_TIER_METRICS = (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Aggregate ARPA tier/client diagnostics across run directories."
+        description="Aggregate GRAIL-FL tier/client diagnostics across run directories."
     )
     parser.add_argument("--input-root", default="results", help="Root directory containing raw run directories.")
-    parser.add_argument("--run-pattern", default=None, help="Glob pattern below --input-root, e.g. arpa_emnist_seed*.")
+    parser.add_argument("--run-pattern", default=None, help="Glob pattern below --input-root, e.g. grail_main_emnist_seed*.")
     parser.add_argument("--run-dirs", default=None, help="Comma-separated explicit raw run directories. Overrides --run-pattern.")
-    parser.add_argument("--method-dir", default="apdp_rtfl", help="Method subdirectory containing ARPA diagnostics.")
+    parser.add_argument("--method-dir", default="grail_fl", help="Method subdirectory containing GRAIL-FL diagnostics.")
     parser.add_argument("--tier-file", default="tier_privacy_summary.csv", help="Tier diagnostic CSV filename.")
     parser.add_argument("--client-file", default="resource_privacy_diagnostics.csv", help="Client diagnostic CSV filename.")
     parser.add_argument("--metrics", default=DEFAULT_TIER_METRICS, help="Comma-separated tier metrics to aggregate.")
     parser.add_argument("--scenario-filter", default=None, help="Optional comma-separated scenarios to keep, e.g. full,no_partial_updates. Use baseline for non-ablation runs.")
     parser.add_argument("--tiers", default="constrained,standard,high", help="Comma-separated resource tiers to keep.")
     parser.add_argument("--require-complete", action="store_true", help="Fail if any matched run directory lacks tier diagnostics.")
-    parser.add_argument("--output-dir", required=True, help="Output directory for aggregate ARPA diagnostics.")
-    parser.add_argument("--title-prefix", default="ARPA Diagnostics", help="Prefix used in aggregate chart titles.")
+    parser.add_argument("--output-dir", required=True, help="Output directory for aggregate GRAIL-FL diagnostics.")
+    parser.add_argument("--title-prefix", default="GRAIL-FL Diagnostics", help="Prefix used in aggregate chart titles.")
     parser.add_argument("--precision", type=int, default=6, help="Decimal places written to aggregate CSV files.")
     return parser.parse_args()
 
@@ -130,13 +130,13 @@ def _read_tier_rows(run_dirs, args, metrics, scenario_filter, tier_filter):
                         row[metric] = _as_float(source_row.get(metric))
                     rows.append(row)
     if missing:
-        print("Skipped run directories without ARPA tier diagnostics:")
+        print("Skipped run directories without GRAIL-FL tier diagnostics:")
         for path in missing:
             print(f"  {path}")
         if args.require_complete:
-            raise FileNotFoundError("Matched run directories are missing ARPA tier diagnostics; rerun without --require-complete to skip them.")
+            raise FileNotFoundError("Matched run directories are missing GRAIL-FL tier diagnostics; rerun without --require-complete to skip them.")
     if not rows:
-        raise ValueError("No ARPA tier diagnostic rows found.")
+        raise ValueError("No GRAIL-FL tier diagnostic rows found.")
     return rows
 
 
@@ -294,7 +294,7 @@ def main():
     print(f"Aggregated {len(run_dirs)} raw run directories and {len(tier_rows)} tier rows.")
     if client_rows:
         print(f"Copied {len(client_rows)} client diagnostic rows.")
-    print(f"ARPA aggregate artifacts saved to: {output_dir}")
+    print(f"GRAIL-FL aggregate artifacts saved to: {output_dir}")
 
 
 if __name__ == "__main__":

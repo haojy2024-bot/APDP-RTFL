@@ -35,14 +35,15 @@ DP_DELTA = 1e-5
 DP_L2_NORM_CLIP = 1.0
 BASE_LEARNING_RATE = 0.01
 EARLYSTOP_PATIENCE = 3
-BASELINE_METHODS = ("dp_fl", "dp_flprox", "dp_fedsgd", "dp_rtfl", "apdp_rtfl")
-SUPPORTED_BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl") + BASELINE_METHODS
+BASELINE_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
+LEGACY_BASELINE_METHODS = ("dp_fl", "dp_flprox", "dp_fedsgd", "dp_rtfl", "apdp_rtfl")
+SUPPORTED_BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl") + BASELINE_METHODS + LEGACY_BASELINE_METHODS
 PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
-PRIVACY_SENSITIVITY_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
-POLLUTION_METHODS = ("apdp_rtfl",)
-FAIRNESS_METHODS = ("dp_fl", "dp_flprox", "dp_fedsgd", "ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
-CONTRIBUTION_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
-AUDIT_METHODS = ("ldp_fl", "global_dp", "dp_rtfl", "apdp_rtfl")
+PRIVACY_SENSITIVITY_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
+POLLUTION_METHODS = ("grail_fl", "apdp_rtfl")
+FAIRNESS_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
+CONTRIBUTION_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
+AUDIT_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
 ABLATION_SCENARIOS = (
     "full",
     "no_adaptive_privacy",
@@ -153,7 +154,7 @@ METHOD_CONFIGS = {
         "resource_orchestrator": False,
     },
     "dp_fl": {
-        "label": "DP-FL",
+        "label": "DP-FedAvg",
         "reference": "Arachchige et al., Local differential privacy for deep learning, IEEE Internet of Things Journal 2019/2020.",
         "dp_scope": "client",
         "use_dp": True,
@@ -166,8 +167,36 @@ METHOD_CONFIGS = {
         "force_client_epochs": None,
         "resource_orchestrator": False,
     },
+    "dp_fedavg": {
+        "label": "DP-FedAvg",
+        "reference": "McMahan et al., Learning Differentially Private Recurrent Language Models, ICLR 2018; McMahan et al., Communication-Efficient Learning of Deep Networks from Decentralized Data, AISTATS 2017.",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": False,
+        "force_client_epochs": None,
+        "resource_orchestrator": False,
+    },
     "dp_flprox": {
-        "label": "DP-FLProx",
+        "label": "DP-FedProx",
+        "reference": "Li et al., Federated optimization in heterogeneous networks, MLSys 2020.",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": True,
+        "force_client_epochs": None,
+        "resource_orchestrator": False,
+    },
+    "dp_fedprox": {
+        "label": "DP-FedProx",
         "reference": "Li et al., Federated optimization in heterogeneous networks, MLSys 2020.",
         "dp_scope": "client",
         "use_dp": True,
@@ -193,6 +222,40 @@ METHOD_CONFIGS = {
         "fedprox": False,
         "force_client_epochs": 1,
         "resource_orchestrator": False,
+    },
+    "dp_fednova": {
+        "label": "DP-FedNova",
+        "reference": "Wang et al., Tackling the Objective Inconsistency Problem in Heterogeneous Federated Optimization, NeurIPS 2020.",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": False,
+        "force_client_epochs": None,
+        "resource_orchestrator": False,
+        "aggregation": "fednova",
+    },
+    "dp_fedadam": {
+        "label": "DP-FedAdam",
+        "reference": "Reddi et al., Adaptive Federated Optimization, ICLR 2021.",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": False,
+        "compute_adapter": False,
+        "use_zkip": False,
+        "use_ebcd": False,
+        "use_tcm": False,
+        "fedprox": False,
+        "force_client_epochs": None,
+        "resource_orchestrator": False,
+        "aggregation": "fedadam",
+        "server_learning_rate": 0.01,
+        "server_beta1": 0.9,
+        "server_beta2": 0.99,
+        "server_tau": 1e-3,
     },
     "global_dp": {
         "label": "Global-DP",
@@ -223,7 +286,21 @@ METHOD_CONFIGS = {
         "resource_orchestrator": False,
     },
     "apdp_rtfl": {
-        "label": "APDP-RTFL",
+        "label": "GRAIL-FL",
+        "reference": "",
+        "dp_scope": "client",
+        "use_dp": True,
+        "dynamic_privacy": True,
+        "compute_adapter": True,
+        "use_zkip": True,
+        "use_ebcd": True,
+        "use_tcm": True,
+        "fedprox": False,
+        "force_client_epochs": None,
+        "resource_orchestrator": True,
+    },
+    "grail_fl": {
+        "label": "GRAIL-FL",
         "reference": "",
         "dp_scope": "client",
         "use_dp": True,
@@ -665,13 +742,44 @@ def _apply_server_dp_to_delta(delta, privacy_config):
     return noisy_delta, noise_stddev
 
 
-def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip, privacy_config=None, apply_server_dp=False):
+def _local_step_count(data_size, epochs, batch_size):
+    return max(1, int(epochs) * int(np.ceil(max(1, data_size) / max(1, batch_size))))
+
+
+def _apply_server_optimizer(aggregated_delta, optimizer_state, config):
+    if optimizer_state is None or config.get("aggregation") != "fedadam":
+        return aggregated_delta
+    beta1 = float(config.get("server_beta1", 0.9))
+    beta2 = float(config.get("server_beta2", 0.99))
+    tau = float(config.get("server_tau", 1e-3))
+    server_lr = float(config.get("server_learning_rate", 0.01))
+    optimizer_state["t"] = int(optimizer_state.get("t", 0)) + 1
+    if "m" not in optimizer_state:
+        optimizer_state["m"] = {key: np.zeros_like(value, dtype=float) for key, value in aggregated_delta.items()}
+        optimizer_state["v"] = {key: np.zeros_like(value, dtype=float) for key, value in aggregated_delta.items()}
+    update = {}
+    for key, delta in aggregated_delta.items():
+        optimizer_state["m"][key] = beta1 * optimizer_state["m"][key] + (1.0 - beta1) * delta
+        optimizer_state["v"][key] = beta2 * optimizer_state["v"][key] + (1.0 - beta2) * np.square(delta)
+        m_hat = optimizer_state["m"][key] / (1.0 - beta1 ** optimizer_state["t"])
+        v_hat = optimizer_state["v"][key] / (1.0 - beta2 ** optimizer_state["t"])
+        update[key] = server_lr * m_hat / (np.sqrt(v_hat) + tau)
+    return update
+
+
+def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip, privacy_config=None,
+                      apply_server_dp=False, config=None, optimizer_state=None):
+    config = config or {}
     valid = []
     total_weight = 0.0
+    weighted_local_steps = 0.0
     aggregated_from = []
     zkip_failures = 0
     for update in deltas_with_sizes:
-        if len(update) == 5:
+        local_steps = 1
+        if len(update) == 6:
+            delta, proof, client_id, data_size, adjusted_weight, local_steps = update
+        elif len(update) == 5:
             delta, proof, client_id, data_size, adjusted_weight = update
         else:
             delta, proof, client_id, data_size = update
@@ -683,21 +791,30 @@ def _aggregate_deltas(base_params, deltas_with_sizes, verify_zkip, zkip, privacy
             continue
         if adjusted_weight <= 0:
             continue
-        valid.append((delta, adjusted_weight))
+        local_steps = max(1, int(local_steps))
+        valid.append((delta, adjusted_weight, local_steps))
         total_weight += adjusted_weight
+        weighted_local_steps += adjusted_weight * local_steps
         aggregated_from.append(client_id)
     if not valid or total_weight == 0:
         return base_params, False, aggregated_from, zkip_failures, 0.0
 
     aggregated_delta = {k: np.zeros_like(v) for k, v in valid[0][0].items()}
-    for delta, adjusted_weight in valid:
+    use_fednova = config.get("aggregation") == "fednova"
+    average_local_steps = weighted_local_steps / total_weight if total_weight else 1.0
+    for delta, adjusted_weight, local_steps in valid:
         weight = adjusted_weight / total_weight
         for key in aggregated_delta:
-            aggregated_delta[key] += delta[key] * weight
+            contribution = delta[key] / local_steps if use_fednova else delta[key]
+            aggregated_delta[key] += contribution * weight
+    if use_fednova:
+        for key in aggregated_delta:
+            aggregated_delta[key] *= average_local_steps
     next_params = {k: np.copy(v) for k, v in base_params.items()}
     server_noise_scale = 0.0
     if apply_server_dp and privacy_config is not None:
         aggregated_delta, server_noise_scale = _apply_server_dp_to_delta(aggregated_delta, privacy_config)
+    aggregated_delta = _apply_server_optimizer(aggregated_delta, optimizer_state, config)
     for key in aggregated_delta:
         next_params[key] += aggregated_delta[key]
     return next_params, True, aggregated_from, zkip_failures, server_noise_scale
@@ -708,7 +825,9 @@ def _aggregate_masked_deltas(base_params, deltas_with_sizes, masks_by_client, ve
     """Coordinate-wise aggregation for ARPA partial parameter-block uploads."""
     valid, aggregated_from, zkip_failures = [], [], 0
     for update in deltas_with_sizes:
-        if len(update) == 5:
+        if len(update) == 6:
+            delta, proof, client_id, data_size, adjusted_weight, _local_steps = update
+        elif len(update) == 5:
             delta, proof, client_id, data_size, adjusted_weight = update
         else:
             delta, proof, client_id, data_size = update
@@ -1945,6 +2064,7 @@ def _run_single_method(
     }
     previous_risk_actions = {}
     contribution_history = []
+    server_optimizer_state = {} if config.get("aggregation") == "fedadam" else None
 
     result = {
         "method": method_name,
@@ -2231,7 +2351,8 @@ def _run_single_method(
                 round_ebcd_stats.append((None, None, None))
             zkip_ok = server.zkip.verify_proof(delta, proof) if config["use_zkip"] else True
             round_zkip_status.append(zkip_ok)
-            client_updates.append((delta, proof, client.client_id, len(client.y_train)))
+            local_steps = _local_step_count(len(client.y_train), effective_epochs, privacy_config.dp_batch_size)
+            client_updates.append((delta, proof, client.client_id, len(client.y_train), len(client.y_train), local_steps))
             if noise_multiplier is not None:
                 noise_stddev = noise_multiplier * client.dp_l2_norm_clip / max(1, min(privacy_config.dp_batch_size, len(client.y_train)))
             else:
@@ -2251,11 +2372,14 @@ def _run_single_method(
                 round_zkip_status,
             )
             regulatory_zkip_failures = sum(1 for row in regulatory_records if row["zkip_status"] is False)
-            client_updates = [
-                (delta, proof, client_id, data_size, adjusted_weights.get(client_id, data_size))
-                for delta, proof, client_id, data_size in client_updates
-                if adjusted_weights.get(client_id, data_size) > 0
-            ]
+            weighted_updates = []
+            for update in client_updates:
+                delta, proof, client_id, data_size = update[:4]
+                local_steps = update[5] if len(update) >= 6 else 1
+                adjusted_weight = adjusted_weights.get(client_id, data_size)
+                if adjusted_weight > 0:
+                    weighted_updates.append((delta, proof, client_id, data_size, adjusted_weight, local_steps))
+            client_updates = weighted_updates
             previous_risk_actions = {
                 int(str(row["client_id"]).split("_")[-1]): row["action"]
                 for row in regulatory_records
@@ -2272,6 +2396,7 @@ def _run_single_method(
             server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_deltas(
                 server.global_model_parameters, client_updates, config["use_zkip"], server.zkip,
                 privacy_config=privacy_config, apply_server_dp=config["dp_scope"] == "server",
+                config=config, optimizer_state=server_optimizer_state,
             )
         zkip_failures += regulatory_zkip_failures
         ebcd_alert = 1 if config["use_ebcd"] and server.ebcd.check_for_corruption(server.global_model_parameters) else 0
@@ -3168,7 +3293,7 @@ def run_baseline_suite(args, output_dir):
 
 
 def run_pollution_injection_suite(args, output_dir):
-    methods = _parse_csv_list(args.methods if args.methods != "all" else "apdp_rtfl", POLLUTION_METHODS, "pollution methods")
+    methods = _parse_csv_list(args.methods if args.methods != "all" else "grail_fl", POLLUTION_METHODS, "pollution methods")
     privacy_config = make_privacy_config(args)
     print(f"Running pollution injection suite: methods={methods}, type={args.pollution_type}, clients={args.polluted_clients}")
     print(f"Results will be saved to: {output_dir}")
@@ -3618,7 +3743,7 @@ def run_participation_suite(args, output_dir):
     for policy in policies:
         policy_output_dir = os.path.join(output_dir, f"participation_{policy}")
         policy_results[policy] = _run_single_method(
-            "apdp_rtfl",
+            "grail_fl",
             args,
             train_val_data,
             X_test,

@@ -23,6 +23,7 @@ from baselines import (
     _allocate_budget,
     _assign_capabilities,
     _effective_epochs,
+    _local_step_count,
     _metric_value,
     _parse_methods,
     _save_method_artifacts,
@@ -355,6 +356,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
     client_privacy_state = _make_client_privacy_state(clients, args, privacy_config, config) if config["dp_scope"] == "client" else {}
     participation_counts = [0 for _ in clients]
     contribution_history = []
+    server_optimizer_state = {} if config.get("aggregation") == "fedadam" else None
     result = {
         "method": method_name,
         "label": f"{config['label']} (torch)",
@@ -465,7 +467,8 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
             round_ebcd_stats.append((np.var(flat), float(kurtosis(flat, fisher=True)), float(skew(flat))))
             zkip_ok = server.zkip.verify_proof(delta, proof) if config["use_zkip"] else True
             round_zkip_status.append(zkip_ok)
-            client_updates.append((delta, proof, client.client_id, len(client.y_train)))
+            local_steps = _local_step_count(len(client.y_train), effective_epochs, privacy_config.dp_batch_size)
+            client_updates.append((delta, proof, client.client_id, len(client.y_train), len(client.y_train), local_steps))
             if noise_multiplier is not None:
                 noise_stddev = noise_multiplier * client.dp_l2_norm_clip / max(1, min(privacy_config.dp_batch_size, len(client.y_train)))
             else:
@@ -479,6 +482,8 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
             server.zkip,
             privacy_config=privacy_config,
             apply_server_dp=config["dp_scope"] == "server",
+            config=config,
+            optimizer_state=server_optimizer_state,
         )
         ebcd_alert = 1 if config["use_ebcd"] and server.ebcd.check_for_corruption(server.global_model_parameters) else 0
         if config["use_tcm"]:

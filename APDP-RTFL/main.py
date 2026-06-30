@@ -36,7 +36,7 @@ EARLYSTOP_PATIENCE = 3
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="APDP-RTFL federated learning experiment")
+    parser = argparse.ArgumentParser(description="GRAIL-FL federated learning experiment")
     parser.add_argument("--dataset", default="emnist",
                         choices=list(SUPPORTED_DATASETS),
                         help="实验数据集。默认 emnist，仅从项目 data/ 目录读取。")
@@ -61,9 +61,9 @@ def parse_args():
                         help="实验名称前缀；实际结果目录会自动追加 _YYYYmmdd_HHMMSS 时间戳。")
     parser.add_argument("--experiment-suite", default="single",
                         choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution", "audit_trace", "ablation"],
-                        help="single runs APDP-RTFL; comparison suites include baselines, participation, privacy_sensitivity, pollution, fairness, synthetic_fairness, contribution, audit_trace, and ablation.")
+                        help="single runs GRAIL-FL; comparison suites include baselines, participation, privacy_sensitivity, pollution, fairness, synthetic_fairness, contribution, audit_trace, and ablation.")
     parser.add_argument("--methods", default="all",
-                        help="Baseline methods: all or comma-separated dp_fl,dp_flprox,dp_fedsgd,dp_rtfl,apdp_rtfl. Global-DP remains available only when explicitly requested.")
+                        help="Baseline methods: all or comma-separated dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl. Legacy keys such as dp_fl and apdp_rtfl remain accepted for compatibility.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
                         help="FedProx proximal coefficient. Default: 0.01.")
     parser.add_argument("--backend", default="sklearn", choices=["sklearn", "torch"],
@@ -91,31 +91,31 @@ def parse_args():
     parser.add_argument("--failure-prob", type=float, default=0.15,
                         help="Per-round client failure probability. Use 0 for utility-only experiments.")
     parser.add_argument("--apdp-warmup-rounds", type=int, default=20,
-                        help="Rounds before APDP adaptive epsilon adjustment starts.")
+                        help="Rounds before GRAIL-FL adaptive epsilon adjustment starts.")
     parser.add_argument("--adaptive-increase-factor", type=float, default=1.10,
-                        help="APDP epsilon multiplier for above-average clients.")
+                        help="GRAIL-FL epsilon multiplier for above-average clients.")
     parser.add_argument("--adaptive-decrease-factor", type=float, default=0.90,
-                        help="APDP epsilon multiplier for below-average clients.")
+                        help="GRAIL-FL epsilon multiplier for below-average clients.")
     parser.add_argument("--disable-compute-epoch-scaling", action="store_true",
                         help="Disable heterogeneous compute local-epoch scaling while keeping epsilon compensation.")
     parser.add_argument("--heterogeneity-profile", default="legacy", choices=["legacy", "regulated_generic"],
-                        help="Resource simulation profile. regulated_generic enables ARPA resource/privacy orchestration for APDP-RTFL.")
+                        help="Resource simulation profile. regulated_generic enables GRAIL-FL resource/privacy orchestration.")
     parser.add_argument("--round-deadline-seconds", type=float, default=5.0,
                         help="Simulated synchronous-round deadline used by the regulated_generic resource profile.")
     parser.add_argument("--reference-batch-seconds", type=float, default=0.01,
                         help="Reference simulated processing time for one local mini-batch at unit compute speed.")
     parser.add_argument("--upload-ratios", default="1.0,0.5,0.25",
-                        help="Comma-separated candidate fractions of parameter blocks uploaded by ARPA clients.")
+                        help="Comma-separated candidate fractions of parameter blocks uploaded by GRAIL-FL clients.")
     parser.add_argument("--parameter-blocks", type=int, default=8,
-                        help="Number of deterministic parameter blocks used by ARPA partial updates.")
+                        help="Number of deterministic parameter blocks used by GRAIL-FL partial updates.")
     parser.add_argument("--arpa-min-initial-privacy-spend", type=float, default=0.25,
-                        help="One-time minimum projected epsilon increment that prevents an ARPA cold-start deadlock.")
+                        help="One-time minimum projected epsilon increment that prevents a GRAIL-FL cold-start deadlock.")
     parser.add_argument("--arpa-privacy-boost-gain", type=float, default=0.8,
-                        help="Gain for closing the gap between expected and actual ARPA privacy-budget utilization.")
+                        help="Gain for closing the gap between expected and actual GRAIL-FL privacy-budget utilization.")
     parser.add_argument("--arpa-max-privacy-boost", type=float, default=1.8,
-                        help="Maximum multiplicative ARPA privacy-spend boost from the utilization controller.")
+                        help="Maximum multiplicative GRAIL-FL privacy-spend boost from the utilization controller.")
     parser.add_argument("--arpa-opportunity-compensation-weight", type=float, default=0.65,
-                        help="Weight for increasing ARPA privacy spend when a compliant client has scarce future opportunities.")
+                        help="Weight for increasing GRAIL-FL privacy spend when a compliant client has scarce future opportunities.")
     parser.add_argument("--arpa-compression-slack-target", type=float, default=0.85,
                         help="Use partial parameter uploads when full upload is feasible but exceeds this fraction of the round deadline.")
     parser.add_argument("--arpa-residual-full-upload-threshold", type=float, default=0.25,
@@ -126,11 +126,11 @@ def parse_args():
                         help="Participation policies: all,random,apdp_score.")
     parser.add_argument("--privacy-budgets", default="20,50,80,100",
                         help="Comma-separated total privacy budgets for privacy sensitivity experiments.")
-    parser.add_argument("--privacy-sensitivity-methods", default="dp_fl,dp_flprox,dp_fedsgd,dp_rtfl,apdp_rtfl",
+    parser.add_argument("--privacy-sensitivity-methods", default="dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl",
                         help="Methods for privacy sensitivity experiments.")
     parser.add_argument("--enable-fairness-evaluation", action="store_true",
                         help="Enable client-level fairness evaluation in sklearn experiment suites.")
-    parser.add_argument("--fairness-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
+    parser.add_argument("--fairness-methods", default="dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl",
                         help="Methods for client-level fairness experiments.")
     parser.add_argument("--synthetic-sensitive-attrs", default="gender,age,region",
                         help="Synthetic client-level sensitive attributes for fairness pressure tests.")
@@ -140,7 +140,7 @@ def parse_args():
                         help="Datasets intended for synthetic fairness pressure tests.")
     parser.add_argument("--enable-contribution-evaluation", action="store_true",
                         help="Enable penalty and approximate Shapley contribution evaluation in sklearn experiment suites.")
-    parser.add_argument("--contribution-methods", default="ldp_fl,global_dp,dp_rtfl,apdp_rtfl",
+    parser.add_argument("--contribution-methods", default="dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl",
                         help="Methods for penalty and Shapley contribution experiments.")
     parser.add_argument("--contribution-quality-weight", type=float, default=0.25,
                         help="Weight for data-quality score in the final contribution score.")
@@ -153,11 +153,11 @@ def parse_args():
     parser.add_argument("--contribution-utility-metric", default="balanced_accuracy",
                         choices=["accuracy", "balanced_accuracy", "f1_score"],
                         help="Utility metric used for leave-one-out approximate Shapley evaluation.")
-    parser.add_argument("--audit-methods", default="apdp_rtfl",
+    parser.add_argument("--audit-methods", default="grail_fl",
                         help="Methods for audit trace experiments.")
     parser.add_argument("--audit-digest-algorithm", default="sha256", choices=["sha256"],
                         help="Digest algorithm for the audit trace hash chain.")
-    parser.add_argument("--ablation-method", default="apdp_rtfl", choices=["apdp_rtfl", "dp_rtfl"],
+    parser.add_argument("--ablation-method", default="grail_fl", choices=["grail_fl", "apdp_rtfl", "dp_rtfl"],
                         help="Base method for ablation experiments.")
     parser.add_argument("--ablation-scenarios", default="full,no_adaptive_privacy,no_compute_adapter,no_resource_orchestration,no_partial_updates,no_resource_fairness,no_opportunity_privacy,no_budget_utilization_boost,no_low_resource_compensation,no_zkip,no_ebcd,no_tcm,no_regulatory,no_contribution,no_fairness",
                         help="Comma-separated ablation scenarios.")
@@ -414,10 +414,10 @@ def main():
     DP_DELTA = args.dp_delta
     DP_L2_NORM_CLIP = args.dp_l2_norm_clip
     # The historical single-run loop used update-level coordinate noise. Route
-    # sklearn single APDP runs through the maintained sample-level DP-SGD suite.
+    # sklearn single GRAIL-FL runs through the maintained sample-level DP-SGD suite.
     if args.experiment_suite == "single" and args.backend == "sklearn":
         from baselines import run_baseline_suite
-        args.methods = "apdp_rtfl"
+        args.methods = "grail_fl"
         run_baseline_suite(args, output_dir)
         return
     if args.experiment_suite in {"baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution", "audit_trace", "ablation"}:
@@ -428,7 +428,7 @@ def main():
         if args.backend == "torch" and args.experiment_suite != "baselines" and args.heterogeneity_profile != "regulated_generic":
             raise NotImplementedError(
                 "Torch backend for paper experiment suites requires --heterogeneity-profile regulated_generic "
-                "so CUDA client training stays on the full ARPA orchestration path."
+                "so CUDA client training stays on the full GRAIL-FL orchestration path."
             )
         from baselines import run_baseline_suite, run_participation_suite, run_privacy_sensitivity_suite, run_pollution_injection_suite, run_fairness_suite, run_synthetic_fairness_suite, run_contribution_suite, run_audit_trace_suite, run_ablation_suite
         if args.experiment_suite == "baselines":
@@ -452,7 +452,7 @@ def main():
         return
     if args.backend == "torch":
         from torch_baselines import run_torch_baseline_suite
-        args.methods = "apdp_rtfl" if args.methods == "all" else args.methods
+        args.methods = "grail_fl" if args.methods == "all" else args.methods
         run_torch_baseline_suite(args, output_dir)
         return
     print("Starting RTFL Simulation with Differential Privacy...")
@@ -464,7 +464,7 @@ def main():
     print(f"DP Parameters: Epsilon={DP_EPSILON}, Delta={DP_DELTA}, L2_Norm_Clip={DP_L2_NORM_CLIP}")
     print(f"Epsilon bounds: min={MIN_EPSILON}, max={MAX_EPSILON}. Failure probability={args.failure_prob}")
     print(
-        "APDP tuning: "
+        "GRAIL-FL adaptive privacy tuning: "
         f"warmup_rounds={args.apdp_warmup_rounds}, "
         f"increase_factor={args.adaptive_increase_factor}, "
         f"decrease_factor={args.adaptive_decrease_factor}, "

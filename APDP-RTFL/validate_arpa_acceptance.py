@@ -1,4 +1,4 @@
-"""Validate whether an ARPA-RTFL run satisfies baseline and mechanism checks."""
+"""Validate whether a GRAIL-FL run satisfies baseline and mechanism checks."""
 
 from __future__ import annotations
 
@@ -9,23 +9,23 @@ import math
 import os
 
 
-DEFAULT_BASELINES = "dp_fl,dp_flprox,dp_fedsgd,ldp_fl,dp_rtfl"
+DEFAULT_BASELINES = "dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam"
 DEFAULT_METRIC = "final_balanced_accuracy"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Validate ARPA-RTFL acceptance criteria for one run directory.")
+    parser = argparse.ArgumentParser(description="Validate GRAIL-FL acceptance criteria for one run directory.")
     parser.add_argument("--run-dir", required=True, help="Timestamped experiment run directory.")
-    parser.add_argument("--method", default="apdp_rtfl", help="Method name to validate.")
+    parser.add_argument("--method", default="grail_fl", help="Method name to validate.")
     parser.add_argument("--baselines", default=DEFAULT_BASELINES, help="Comma-separated baseline method names.")
     parser.add_argument("--metric", default=DEFAULT_METRIC, help="Final metric used for baseline win checks.")
-    parser.add_argument("--min-win-margin", type=float, default=0.0, help="Minimum required APDP minus baseline metric margin.")
+    parser.add_argument("--min-win-margin", type=float, default=0.0, help="Minimum required GRAIL-FL minus baseline metric margin.")
     parser.add_argument("--require-all-baselines", action="store_true", help="Fail if any requested baseline is missing.")
     parser.add_argument("--min-epsilon-utilization", type=float, default=0.70, help="Minimum average tier epsilon utilization.")
     parser.add_argument("--min-constrained-success-rate", type=float, default=0.50, help="Minimum constrained-tier effective participation rate.")
     parser.add_argument("--max-deadline-failure-rate", type=float, default=0.20, help="Maximum selected-row predicted deadline failure rate.")
     parser.add_argument("--output-dir", default=None, help="Output directory. Default: <run-dir>/acceptance.")
-    parser.add_argument("--strict", action="store_true", help="Fail if optional ARPA diagnostic files are missing.")
+    parser.add_argument("--strict", action="store_true", help="Fail if optional GRAIL-FL diagnostic files are missing.")
     return parser.parse_args()
 
 

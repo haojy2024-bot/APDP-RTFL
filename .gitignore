@@ -1,26 +1,18 @@
+# Only track the main project package from the repository root.
+/*
+!/.gitignore
+!/APDP-RTFL/
+
+# Generated/local artifacts, including inside APDP-RTFL/.
 __pycache__/
 *.py[cod]
-
 *.png
 *.npy
 logs/
 save/
 data/
 APDP-RTFL/data/
-.agents/
-.codex/
-.vscode/
-_render_problem_formulation_revised/
-_render_related_word_2_polished/
-_tmp_render/
-_tmp_render_work/
-_tmp_render_work_elevated/
-figure-studio-runs/
-tools/
 results/
 results_2/
 results_3/
 outputs/
-调整.md
-*.docx
-*.md
