@@ -76,6 +76,10 @@ def parse_args():
                         help="Torch model backbone. linear preserves historical softmax regression; mlp uses a small fully connected network; cnn uses a compact image CNN.")
     parser.add_argument("--torch-mlp-hidden", default="256,128",
                         help="Comma-separated hidden layer sizes for --torch-model mlp.")
+    parser.add_argument("--torch-cnn-channels", default="16,32",
+                        help="Comma-separated Conv2d output channels for --torch-model cnn. Default keeps the compact CNN: 16,32.")
+    parser.add_argument("--torch-cnn-fc", type=int, default=128,
+                        help="Hidden units in the CNN fully connected layer for --torch-model cnn.")
     parser.add_argument("--total-privacy-budget", type=float, default=TOTAL_PRIVACY_BUDGET,
                         help="Deprecated compatibility alias for --epsilon-per-client-total in client-DP runs.")
     parser.add_argument("--epsilon-per-client-total", type=float, default=None,

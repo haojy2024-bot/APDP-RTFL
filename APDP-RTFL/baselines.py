@@ -691,7 +691,7 @@ def _init_backend_clients(train_val_data, num_features, classes, args, privacy_c
     if backend != "torch":
         raise ValueError(f"Unsupported backend: {backend}")
     try:
-        from torch_baselines import TorchLinearClient, _parse_mlp_hidden, _resolve_device
+        from torch_baselines import TorchLinearClient, _parse_cnn_channels, _parse_mlp_hidden, _resolve_device
     except ImportError as exc:
         raise RuntimeError(
             "The torch backend requires PyTorch. Install a CUDA-enabled PyTorch build "
@@ -717,6 +717,8 @@ def _init_backend_clients(train_val_data, num_features, classes, args, privacy_c
                 privacy_config=privacy_config,
                 model_type=getattr(args, "torch_model", "linear"),
                 mlp_hidden=_parse_mlp_hidden(getattr(args, "torch_mlp_hidden", "256,128")),
+                cnn_channels=_parse_cnn_channels(getattr(args, "torch_cnn_channels", "16,32")),
+                cnn_fc=getattr(args, "torch_cnn_fc", 128),
             )
         )
     return clients, "torch", device

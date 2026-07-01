@@ -54,6 +54,8 @@ class TorchLinearClient:
         privacy_config=None,
         model_type="linear",
         mlp_hidden=(256, 128),
+        cnn_channels=(16, 32),
+        cnn_fc=128,
     ):
         self.client_id = client_id
         self.X_train = np.asarray(X_train, dtype=np.float32)
@@ -70,6 +72,8 @@ class TorchLinearClient:
         self.random_state = random_state
         self.model_type = model_type
         self.mlp_hidden = tuple(int(v) for v in mlp_hidden)
+        self.cnn_channels = tuple(int(v) for v in cnn_channels)
+        self.cnn_fc = int(cnn_fc)
         self.image_shape = _infer_image_shape(num_features)
         self.dp_epsilon = privacy_config.dp_epsilon
         self.dp_delta = privacy_config.dp_delta
@@ -101,18 +105,21 @@ class TorchLinearClient:
             channels, height, width = self.image_shape
             if height < 4 or width < 4:
                 raise ValueError("--torch-model cnn requires image-like flattened input.")
+            if len(self.cnn_channels) != 2:
+                raise ValueError("--torch-cnn-channels currently expects exactly two comma-separated values, e.g. 32,64.")
+            conv1_out, conv2_out = self.cnn_channels
             return torch.nn.Sequential(
                 torch.nn.Unflatten(1, (channels, height, width)),
-                torch.nn.Conv2d(channels, 16, kernel_size=3, padding=1),
+                torch.nn.Conv2d(channels, conv1_out, kernel_size=3, padding=1),
                 torch.nn.ReLU(),
                 torch.nn.MaxPool2d(2),
-                torch.nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                torch.nn.Conv2d(conv1_out, conv2_out, kernel_size=3, padding=1),
                 torch.nn.ReLU(),
                 torch.nn.MaxPool2d(2),
                 torch.nn.Flatten(),
-                torch.nn.Linear(32 * (height // 4) * (width // 4), 128),
+                torch.nn.Linear(conv2_out * (height // 4) * (width // 4), self.cnn_fc),
                 torch.nn.ReLU(),
-                torch.nn.Linear(128, self.n_classes),
+                torch.nn.Linear(self.cnn_fc, self.n_classes),
             )
         raise ValueError(f"Unsupported torch model type: {self.model_type}")
 
@@ -365,6 +372,16 @@ def _parse_mlp_hidden(value):
     return tuple(int(part.strip()) for part in str(value).split(",") if part.strip())
 
 
+def _parse_cnn_channels(value):
+    if isinstance(value, (list, tuple)):
+        channels = tuple(int(v) for v in value)
+    else:
+        channels = tuple(int(part.strip()) for part in str(value).split(",") if part.strip())
+    if len(channels) != 2:
+        raise ValueError("--torch-cnn-channels expects exactly two comma-separated values, e.g. 32,64.")
+    return channels
+
+
 def _infer_image_shape(num_features):
     if num_features == 784:
         return (1, 28, 28)
@@ -516,6 +533,8 @@ def _init_torch_clients(train_val_data, num_features, classes, device, args, pri
                 privacy_config=privacy_config,
                 model_type=getattr(args, "torch_model", "linear"),
                 mlp_hidden=_parse_mlp_hidden(getattr(args, "torch_mlp_hidden", "256,128")),
+                cnn_channels=_parse_cnn_channels(getattr(args, "torch_cnn_channels", "16,32")),
+                cnn_fc=getattr(args, "torch_cnn_fc", 128),
             )
         )
     return clients
@@ -768,7 +787,9 @@ def run_torch_baseline_suite(args, output_dir):
     print(f"Running torch baseline suite on device={device}: {methods}")
     print(
         f"Torch model: {getattr(args, 'torch_model', 'linear')}; "
-        f"mlp_hidden={getattr(args, 'torch_mlp_hidden', '256,128')}"
+        f"mlp_hidden={getattr(args, 'torch_mlp_hidden', '256,128')}; "
+        f"cnn_channels={getattr(args, 'torch_cnn_channels', '16,32')}; "
+        f"cnn_fc={getattr(args, 'torch_cnn_fc', 128)}"
     )
     print(f"Results will be saved to: {output_dir}")
     print(
