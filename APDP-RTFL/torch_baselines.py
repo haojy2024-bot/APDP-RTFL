@@ -52,6 +52,8 @@ class TorchLinearClient:
         batch_size=256,
         random_state=0,
         privacy_config=None,
+        model_type="linear",
+        mlp_hidden=(256, 128),
     ):
         self.client_id = client_id
         self.X_train = np.asarray(X_train, dtype=np.float32)
@@ -66,15 +68,15 @@ class TorchLinearClient:
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.random_state = random_state
+        self.model_type = model_type
+        self.mlp_hidden = tuple(int(v) for v in mlp_hidden)
         self.dp_epsilon = privacy_config.dp_epsilon
         self.dp_delta = privacy_config.dp_delta
         self.dp_l2_norm_clip = privacy_config.dp_l2_norm_clip
         self.dp_batch_size = int(privacy_config.dp_batch_size)
-        self.model = torch.nn.Linear(num_features, self.n_classes).to(device)
+        self.model = self._build_model().to(device)
         torch.manual_seed(random_state)
-        with torch.no_grad():
-            self.model.weight.zero_()
-            self.model.bias.zero_()
+        self._initialize_model()
         from zkip import ZeroKnowledgeIntegrityProofs
 
         self.zkip = ZeroKnowledgeIntegrityProofs()
@@ -82,19 +84,57 @@ class TorchLinearClient:
         self.last_val_loss_drop = 0.0
         self.last_privacy_event = None
 
+    def _build_model(self):
+        if self.model_type == "linear":
+            return torch.nn.Linear(self.num_features, self.n_classes)
+        if self.model_type == "mlp":
+            layers = []
+            in_features = self.num_features
+            for hidden in self.mlp_hidden:
+                layers.append(torch.nn.Linear(in_features, hidden))
+                layers.append(torch.nn.ReLU())
+                in_features = hidden
+            layers.append(torch.nn.Linear(in_features, self.n_classes))
+            return torch.nn.Sequential(*layers)
+        raise ValueError(f"Unsupported torch model type: {self.model_type}")
+
+    def _initialize_model(self):
+        torch.manual_seed(self.random_state)
+        with torch.no_grad():
+            if self.model_type == "linear":
+                self.model.weight.zero_()
+                self.model.bias.zero_()
+                return
+            for module in self.model.modules():
+                if isinstance(module, torch.nn.Linear):
+                    torch.nn.init.xavier_uniform_(module.weight)
+                    module.bias.zero_()
+
     def model_parameters(self):
         with torch.no_grad():
+            if self.model_type == "linear":
+                return {
+                    "coef_": self.model.weight.detach().cpu().numpy().copy(),
+                    "intercept_": self.model.bias.detach().cpu().numpy().copy(),
+                }
             return {
-                "coef_": self.model.weight.detach().cpu().numpy().copy(),
-                "intercept_": self.model.bias.detach().cpu().numpy().copy(),
+                name: value.detach().cpu().numpy().copy()
+                for name, value in self.model.state_dict().items()
             }
 
     def set_global_model_parameters(self, global_params):
         with torch.no_grad():
-            weight = torch.tensor(global_params["coef_"], dtype=torch.float32, device=self.device)
-            bias = torch.tensor(global_params["intercept_"], dtype=torch.float32, device=self.device)
-            self.model.weight.copy_(weight)
-            self.model.bias.copy_(bias)
+            if self.model_type == "linear":
+                weight = torch.tensor(global_params["coef_"], dtype=torch.float32, device=self.device)
+                bias = torch.tensor(global_params["intercept_"], dtype=torch.float32, device=self.device)
+                self.model.weight.copy_(weight)
+                self.model.bias.copy_(bias)
+                return
+            state = {
+                name: torch.tensor(value, dtype=torch.float32, device=self.device)
+                for name, value in global_params.items()
+            }
+            self.model.load_state_dict(state, strict=True)
 
     def _encode_y(self, y):
         return np.asarray([self.class_to_index[int(label)] for label in y], dtype=np.int64)
@@ -136,15 +176,20 @@ class TorchLinearClient:
             return None, None
 
         self.set_global_model_parameters(global_params)
-        global_weight = torch.tensor(global_params["coef_"], dtype=torch.float32, device=self.device)
-        global_bias = torch.tensor(global_params["intercept_"], dtype=torch.float32, device=self.device)
         X = torch.tensor(self.X_train, dtype=torch.float32, device=self.device)
         y = torch.tensor(self._encode_y(self.y_train), dtype=torch.long, device=self.device)
-        weight = self.model.weight
-        bias = self.model.bias
         generator = self._make_generator(10007 * int(round_num or 1))
         noise_std = float(noise_multiplier) * float(self.dp_l2_norm_clip)
 
+        if self.model_type == "mlp":
+            return self._train_mlp_with_dp_sgd(
+                global_params, X, y, epochs, fedprox_mu, generator, noise_std
+            )
+
+        global_weight = torch.tensor(global_params["coef_"], dtype=torch.float32, device=self.device)
+        global_bias = torch.tensor(global_params["intercept_"], dtype=torch.float32, device=self.device)
+        weight = self.model.weight
+        bias = self.model.bias
         with torch.no_grad():
             for _ in range(int(epochs)):
                 for _ in range(int(np.ceil(n_samples / batch_size))):
@@ -179,6 +224,64 @@ class TorchLinearClient:
         proof = self.zkip.generate_proof(delta)
         return delta, proof
 
+    def _train_mlp_with_dp_sgd(self, global_params, X, y, epochs, fedprox_mu, generator, noise_std):
+        try:
+            from torch.func import functional_call, grad, vmap
+        except ImportError as exc:
+            raise RuntimeError("--torch-model mlp requires a PyTorch build with torch.func support.") from exc
+
+        batch_size = min(max(1, int(self.dp_batch_size)), len(self.y_train))
+        sample_rate = batch_size / max(1, len(self.y_train))
+        global_tensors = {
+            name: torch.tensor(value, dtype=torch.float32, device=self.device)
+            for name, value in global_params.items()
+        }
+
+        def loss_one(params, x_one, y_one):
+            logits = functional_call(self.model, params, (x_one.unsqueeze(0),))
+            return torch.nn.functional.cross_entropy(logits, y_one.unsqueeze(0))
+
+        grad_one = grad(loss_one)
+        grad_many = vmap(grad_one, in_dims=(None, 0, 0))
+
+        for _ in range(int(epochs)):
+            for _ in range(int(np.ceil(len(self.y_train) / batch_size))):
+                selected = torch.rand(len(self.y_train), device=self.device, generator=generator) < sample_rate
+                if not bool(selected.any().item()):
+                    selected[torch.randint(len(self.y_train), (1,), device=self.device, generator=generator)] = True
+                X_batch = X[selected]
+                y_batch = y[selected]
+                params = {name: param for name, param in self.model.named_parameters()}
+                per_sample_grads = grad_many(params, X_batch, y_batch)
+                norms = None
+                for grad_values in per_sample_grads.values():
+                    flat = grad_values.reshape(grad_values.shape[0], -1)
+                    term = flat.square().sum(dim=1)
+                    norms = term if norms is None else norms + term
+                norms = torch.sqrt(norms + 1e-12)
+                scales = torch.clamp(float(self.dp_l2_norm_clip) / (norms + 1e-12), max=1.0)
+                denominator = max(1, int(y_batch.shape[0]))
+
+                with torch.no_grad():
+                    for name, param in self.model.named_parameters():
+                        grad_values = per_sample_grads[name]
+                        view_shape = (grad_values.shape[0],) + (1,) * (grad_values.ndim - 1)
+                        clipped_mean = (grad_values * scales.reshape(view_shape)).mean(dim=0)
+                        noise = torch.randn(
+                            clipped_mean.shape,
+                            device=self.device,
+                            generator=generator,
+                        ) * (noise_std / denominator)
+                        update = clipped_mean + noise
+                        if fedprox_mu > 0:
+                            update = update + fedprox_mu * (param - global_tensors[name])
+                        param -= self.learning_rate * update
+
+        current_params = self.model_parameters()
+        delta = {key: current_params[key] - global_params[key] for key in current_params}
+        proof = self.zkip.generate_proof(delta)
+        return delta, proof
+
     def train(self, global_params, epochs, use_dp=True, fedprox_mu=0.0,
               privacy_accountant=None, noise_multiplier=None, round_num=None):
         if self.X_train.shape[0] == 0:
@@ -194,8 +297,10 @@ class TorchLinearClient:
                 round_num,
             )
         self.set_global_model_parameters(global_params)
-        global_weight = torch.tensor(global_params["coef_"], dtype=torch.float32, device=self.device)
-        global_bias = torch.tensor(global_params["intercept_"], dtype=torch.float32, device=self.device)
+        global_tensors = {
+            name: torch.tensor(value, dtype=torch.float32, device=self.device)
+            for name, value in global_params.items()
+        }
         X = torch.tensor(self.X_train, dtype=torch.float32, device=self.device)
         y = torch.tensor(self._encode_y(self.y_train), dtype=torch.long, device=self.device)
         optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
@@ -209,8 +314,10 @@ class TorchLinearClient:
                 logits = self.model(X[idx])
                 loss = torch.nn.functional.cross_entropy(logits, y[idx])
                 if fedprox_mu > 0:
-                    prox = torch.sum((self.model.weight - global_weight) ** 2)
-                    prox = prox + torch.sum((self.model.bias - global_bias) ** 2)
+                    prox = None
+                    for name, param in self.model.named_parameters():
+                        term = torch.sum((param - global_tensors[name]) ** 2)
+                        prox = term if prox is None else prox + term
                     loss = loss + 0.5 * fedprox_mu * prox
                 optimizer.zero_grad()
                 loss.backward()
@@ -231,6 +338,20 @@ def _initial_params(num_features, n_classes):
     }
 
 
+def _parse_mlp_hidden(value):
+    if isinstance(value, (list, tuple)):
+        return tuple(int(v) for v in value)
+    return tuple(int(part.strip()) for part in str(value).split(",") if part.strip())
+
+
+def _flatten_params(params):
+    arrays = []
+    for key in sorted(params):
+        value = np.asarray(params[key])
+        arrays.append(value.reshape(-1))
+    return np.concatenate(arrays) if arrays else np.asarray([], dtype=np.float32)
+
+
 def _softmax(logits):
     logits = logits - np.max(logits, axis=1, keepdims=True)
     exp_logits = np.exp(logits)
@@ -238,7 +359,7 @@ def _softmax(logits):
 
 
 def _evaluate_params(params, X_test, y_test, classes):
-    logits = np.asarray(X_test, dtype=np.float32) @ params["coef_"].T + params["intercept_"]
+    logits = _predict_logits_from_params(params, X_test)
     probas = _softmax(logits)
     pred_indices = np.argmax(probas, axis=1)
     predictions = classes[pred_indices]
@@ -273,6 +394,24 @@ def _evaluate_params(params, X_test, y_test, classes):
     }
 
 
+def _predict_logits_from_params(params, X_data):
+    if "coef_" in params and "intercept_" in params:
+        return np.asarray(X_data, dtype=np.float32) @ params["coef_"].T + params["intercept_"]
+    activations = np.asarray(X_data, dtype=np.float32)
+    layer_indices = sorted(
+        int(key.split(".")[0])
+        for key in params
+        if key.endswith(".weight") and key.split(".")[0].isdigit()
+    )
+    linear_layers = [idx for idx in layer_indices if f"{idx}.bias" in params]
+    for layer_pos, idx in enumerate(linear_layers):
+        activations = activations @ np.asarray(params[f"{idx}.weight"], dtype=np.float32).T
+        activations = activations + np.asarray(params[f"{idx}.bias"], dtype=np.float32)
+        if layer_pos < len(linear_layers) - 1:
+            activations = np.maximum(activations, 0.0)
+    return activations
+
+
 def _resolve_device(device_arg):
     if device_arg == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -299,6 +438,8 @@ def _init_torch_clients(train_val_data, num_features, classes, device, args, pri
                 batch_size=args.torch_batch_size,
                 random_state=args.seed + i,
                 privacy_config=privacy_config,
+                model_type=getattr(args, "torch_model", "linear"),
+                mlp_hidden=_parse_mlp_hidden(getattr(args, "torch_mlp_hidden", "256,128")),
             )
         )
     return clients
@@ -463,7 +604,7 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
             update_norm = np.sqrt(sum(np.linalg.norm(v.flatten()) ** 2 for v in delta.values()))
             round_update_norms.append(update_norm)
             round_delta_norm += update_norm
-            flat = delta["coef_"].flatten()
+            flat = _flatten_params(delta)
             round_ebcd_stats.append((np.var(flat), float(kurtosis(flat, fisher=True)), float(skew(flat))))
             zkip_ok = server.zkip.verify_proof(delta, proof) if config["use_zkip"] else True
             round_zkip_status.append(zkip_ok)
@@ -545,6 +686,10 @@ def run_torch_baseline_suite(args, output_dir):
     methods = _parse_methods(args.methods)
     privacy_config = make_privacy_config(args)
     print(f"Running torch baseline suite on device={device}: {methods}")
+    print(
+        f"Torch model: {getattr(args, 'torch_model', 'linear')}; "
+        f"mlp_hidden={getattr(args, 'torch_mlp_hidden', '256,128')}"
+    )
     print(f"Results will be saved to: {output_dir}")
     print(
         "Privacy config: "

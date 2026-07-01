@@ -691,7 +691,7 @@ def _init_backend_clients(train_val_data, num_features, classes, args, privacy_c
     if backend != "torch":
         raise ValueError(f"Unsupported backend: {backend}")
     try:
-        from torch_baselines import TorchLinearClient, _resolve_device
+        from torch_baselines import TorchLinearClient, _parse_mlp_hidden, _resolve_device
     except ImportError as exc:
         raise RuntimeError(
             "The torch backend requires PyTorch. Install a CUDA-enabled PyTorch build "
@@ -715,6 +715,8 @@ def _init_backend_clients(train_val_data, num_features, classes, args, privacy_c
                 batch_size=args.torch_batch_size,
                 random_state=args.seed + i,
                 privacy_config=privacy_config,
+                model_type=getattr(args, "torch_model", "linear"),
+                mlp_hidden=_parse_mlp_hidden(getattr(args, "torch_mlp_hidden", "256,128")),
             )
         )
     return clients, "torch", device
@@ -964,12 +966,40 @@ def _make_eval_server(method_name, client_ids, num_features, classes, params):
     return server
 
 
+def _flatten_parameter_dict(params):
+    arrays = []
+    for key in sorted(params):
+        value = np.asarray(params[key])
+        arrays.append(value.reshape(-1))
+    return np.concatenate(arrays) if arrays else np.asarray([], dtype=np.float32)
+
+
+def _predict_logits_from_torch_params(params, X_eval):
+    if "coef_" in params and "intercept_" in params:
+        logits = np.asarray(X_eval, dtype=np.float32) @ np.asarray(params["coef_"], dtype=np.float32).T
+        return logits + np.asarray(params["intercept_"], dtype=np.float32)
+    activations = np.asarray(X_eval, dtype=np.float32)
+    layer_indices = sorted(
+        int(key.split(".")[0])
+        for key in params
+        if key.endswith(".weight") and key.split(".")[0].isdigit()
+    )
+    linear_layers = [idx for idx in layer_indices if f"{idx}.bias" in params]
+    if not linear_layers:
+        raise ValueError("Torch parameter dictionary does not contain linear or MLP weights.")
+    for layer_pos, idx in enumerate(linear_layers):
+        activations = activations @ np.asarray(params[f"{idx}.weight"], dtype=np.float32).T
+        activations = activations + np.asarray(params[f"{idx}.bias"], dtype=np.float32)
+        if layer_pos < len(linear_layers) - 1:
+            activations = np.maximum(activations, 0.0)
+    return activations
+
+
 def _evaluate_softmax_params(params, X_eval, y_eval, classes):
     if X_eval is None or y_eval is None or len(y_eval) == 0:
         return {}
     class_values = np.asarray(classes, dtype=int)
-    logits = np.asarray(X_eval, dtype=np.float32) @ np.asarray(params["coef_"], dtype=np.float32).T
-    logits = logits + np.asarray(params["intercept_"], dtype=np.float32)
+    logits = _predict_logits_from_torch_params(params, X_eval)
     logits = logits - np.max(logits, axis=1, keepdims=True)
     exp_logits = np.exp(logits)
     probas = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
@@ -1012,8 +1042,7 @@ def _evaluate_global_params(method_name, client_ids, num_features, classes, para
         pred_classes = np.unique(
             np.asarray(classes, dtype=int)[
                 np.argmax(
-                    np.asarray(X_test, dtype=np.float32) @ np.asarray(params["coef_"], dtype=np.float32).T
-                    + np.asarray(params["intercept_"], dtype=np.float32),
+                    _predict_logits_from_torch_params(params, X_test),
                     axis=1,
                 )
             ]
@@ -1030,7 +1059,7 @@ def _evaluate_params_on_client(params, client, classes, num_features):
     if X_eval is None or y_eval is None or len(np.unique(y_eval)) < 2:
         return None
     class_values = np.asarray(classes, dtype=int)
-    if np.asarray(params["coef_"]).shape[0] == len(class_values):
+    if "coef_" not in params or np.asarray(params["coef_"]).shape[0] == len(class_values):
         try:
             metrics = _evaluate_softmax_params(params, X_eval, y_eval, classes)
             return {
@@ -1125,6 +1154,13 @@ def _evaluate_params_global(params, X_eval, y_eval, classes, num_features):
     if X_eval is None or y_eval is None or len(y_eval) == 0:
         return {"accuracy": np.nan, "balanced_accuracy": np.nan, "f1_score": np.nan}
     class_values = np.asarray(classes, dtype=int)
+    if "coef_" not in params:
+        metrics = _evaluate_softmax_params(params, X_eval, y_eval, classes)
+        return {
+            "accuracy": metrics.get("accuracy", np.nan),
+            "balanced_accuracy": metrics.get("balanced_accuracy", np.nan),
+            "f1_score": metrics.get("f1_score", np.nan),
+        }
     param_classes = 1 if len(class_values) <= 2 else len(class_values)
     model = SGDClassifier(loss="log_loss")
     model.coef_ = np.zeros((param_classes, num_features))
@@ -2344,8 +2380,8 @@ def _run_single_method(
             update_norm = np.sqrt(sum(np.linalg.norm(v.flatten()) ** 2 for v in delta.values()))
             round_update_norms.append(update_norm)
             round_delta_norm += update_norm
-            if "coef_" in delta and hasattr(delta["coef_"], "flatten"):
-                flat = delta["coef_"].flatten()
+            flat = _flatten_parameter_dict(delta)
+            if flat.size:
                 round_ebcd_stats.append((np.var(flat), kurtosis(flat, fisher=True), skew(flat)))
             else:
                 round_ebcd_stats.append((None, None, None))
