@@ -2385,7 +2385,10 @@ def _run_single_method(
                 for row in regulatory_records
             }
         else:
-            adjusted_weights = {client_id: data_size for _, _, client_id, data_size in client_updates}
+            adjusted_weights = {
+                update[2]: update[3]
+                for update in client_updates
+            }
 
         if arpa_enabled:
             server.global_model_parameters, aggregation_success, aggregated_from, zkip_failures, server_noise_scale = _aggregate_masked_deltas(

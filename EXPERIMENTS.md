@@ -90,16 +90,83 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 The command should print `True`.
 
-Torch/GPU-GRAIL baseline command:
+Torch/GPU-GRAIL baseline commands for the four paper datasets:
 
-```powershell
-python APDP-RTFL/main.py --experiment-suite baselines --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --run-name grail_main_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --min-epsilon 0.1 --max-epsilon 2 --dp-epsilon 1 --dp-delta 1e-5 --dp-l2-norm-clip 1 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  for seed in 42 43 44; do
+    python APDP-RTFL/main.py \
+      --experiment-suite baselines \
+      --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl \
+      --run-name grail_main_${dataset}_seed${seed} \
+      --dataset ${dataset} \
+      --emnist-split balanced \
+      --num-clients 20 \
+      --num-rounds 200 \
+      --client-epochs 3 \
+      --partition dirichlet \
+      --dirichlet-alpha 0.5 \
+      --epsilon-per-client-total 5 \
+      --min-epsilon 0.1 \
+      --max-epsilon 2 \
+      --dp-epsilon 1 \
+      --dp-delta 1e-5 \
+      --dp-l2-norm-clip 1 \
+      --dp-batch-size 256 \
+      --torch-batch-size 256 \
+      --backend torch \
+      --device cuda \
+      --heterogeneity-profile regulated_generic \
+      --round-deadline-seconds 5 \
+      --reference-batch-seconds 0.01 \
+      --parameter-blocks 8 \
+      --upload-ratios 1.0,0.5,0.25 \
+      --arpa-privacy-boost-gain 0.8 \
+      --arpa-max-privacy-boost 1.8 \
+      --arpa-opportunity-compensation-weight 0.65 \
+      --arpa-compression-slack-target 0.85 \
+      --arpa-residual-full-upload-threshold 0.25 \
+      --seed ${seed}
+  done
+done
 ```
 
 CUDA is an experimental execution backend, not a claim that all real edge clients have GPUs. Resource heterogeneity remains controlled by the regulated resource profile and deadline simulation. The sklearn/GRAIL command below remains available as a CPU-compatible reference path for backend consistency checks.
 
-```powershell
-python APDP-RTFL/main.py --experiment-suite baselines --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --run-name grail_main_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --min-epsilon 0.1 --max-epsilon 2 --dp-epsilon 1 --dp-delta 1e-5 --dp-l2-norm-clip 1 --backend sklearn --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  for seed in 42 43 44; do
+    python APDP-RTFL/main.py \
+      --experiment-suite baselines \
+      --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl \
+      --run-name grail_main_${dataset}_seed${seed} \
+      --dataset ${dataset} \
+      --emnist-split balanced \
+      --num-clients 20 \
+      --num-rounds 200 \
+      --client-epochs 3 \
+      --partition dirichlet \
+      --dirichlet-alpha 0.5 \
+      --epsilon-per-client-total 5 \
+      --min-epsilon 0.1 \
+      --max-epsilon 2 \
+      --dp-epsilon 1 \
+      --dp-delta 1e-5 \
+      --dp-l2-norm-clip 1 \
+      --backend sklearn \
+      --heterogeneity-profile regulated_generic \
+      --round-deadline-seconds 5 \
+      --reference-batch-seconds 0.01 \
+      --parameter-blocks 8 \
+      --upload-ratios 1.0,0.5,0.25 \
+      --arpa-privacy-boost-gain 0.8 \
+      --arpa-max-privacy-boost 1.8 \
+      --arpa-opportunity-compensation-weight 0.65 \
+      --arpa-compression-slack-target 0.85 \
+      --arpa-residual-full-upload-threshold 0.25 \
+      --seed ${seed}
+  done
+done
 ```
 
 Key outputs are `baseline_final_metrics.csv`, `baseline_summary.csv`, `baseline_comparison.png`, and `baseline_method_metadata.csv`. The metadata file is the code-side record for the comparison table:
@@ -234,12 +301,19 @@ Before pooling seeds, retain each raw run directory. Aggregate only the relevant
 
 ## 8. Multi-Seed Aggregation And Paper Tables
 
-Run each formal command once per seed, keeping a stable prefix pattern. For the new GRAIL-FL main baseline, use `--run-name grail_main_emnist_seed42`, `grail_main_emnist_seed43`, and `grail_main_emnist_seed44`; the runner produces directories such as `grail_main_emnist_seed42_20260625_123417` automatically. Do not reuse old APDP result prefixes when preparing the final paper table.
+Run each formal command once per dataset and seed, keeping a stable prefix pattern. For the new GRAIL-FL main baseline, use names such as `grail_main_emnist_seed42`, `grail_main_femnist_seed42`, `grail_main_cifar10_seed42`, and `grail_main_medmnist_seed42`; the runner appends timestamps automatically. Do not reuse old APDP result prefixes when preparing the final paper table.
 
 Aggregate raw baseline directories without modifying them:
 
-```powershell
-python APDP-RTFL/aggregate_results.py --input-root results --run-pattern grail_main_emnist_seed* --input-file baseline_final_metrics.csv --output-dir results/grail_main_emnist_aggregate --title-prefix "EMNIST DP Baselines with GRAIL-FL"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_results.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --input-file baseline_final_metrics.csv \
+    --output-dir results/grail_main_${dataset}_aggregate \
+    --title-prefix "${dataset} DP Baselines with GRAIL-FL"
+done
 ```
 
 The aggregator creates three CSV files:
@@ -254,14 +328,27 @@ It also creates `aggregate_<metric>.png` files with mean plus sample-standard-de
 
 GRAIL-FL resource-tier diagnostics require a separate aggregation pass. The script reads each run directory's `grail_fl/tier_privacy_summary.csv` and `grail_fl/resource_privacy_diagnostics.csv`; if the input is an ablation directory, it also recursively reads diagnostics under `scenario/grail_fl/`:
 
-```powershell
-python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern grail_main_emnist_seed* --output-dir results/grail_emnist_diagnostics_aggregate --title-prefix "EMNIST GRAIL-FL Diagnostics"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_arpa_diagnostics.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --output-dir results/grail_${dataset}_diagnostics_aggregate \
+    --title-prefix "${dataset} GRAIL-FL Diagnostics"
+done
 ```
 
 For formal acceptance, add `--require-complete` so any run missing `tier_privacy_summary.csv` fails the aggregation instead of being silently skipped:
 
-```powershell
-python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern grail_main_emnist_seed* --require-complete --output-dir results/grail_emnist_diagnostics_aggregate_strict --title-prefix "EMNIST GRAIL-FL Diagnostics"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_arpa_diagnostics.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --require-complete \
+    --output-dir results/grail_${dataset}_diagnostics_aggregate_strict \
+    --title-prefix "${dataset} GRAIL-FL Diagnostics"
+done
 ```
 
 Main outputs:
@@ -276,8 +363,15 @@ Main outputs:
 
 Default diagnostics include `avg_epsilon_utilization`, `avg_historical_success_rate`, `avg_deadline_feasible_rate`, `avg_noise_multiplier`, `avg_upload_ratio`, `avg_residual_pressure`, `compressed_selection_count`, and `residual_feedback_full_upload_count`. To focus on the core governance metrics in the main text, specify metrics explicitly:
 
-```powershell
-python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern grail_main_emnist_seed* --metrics avg_epsilon_utilization,avg_historical_success_rate,avg_upload_ratio,residual_feedback_full_upload_count --output-dir results/grail_emnist_diagnostics_core --title-prefix "EMNIST GRAIL-FL Core Diagnostics"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_arpa_diagnostics.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --metrics avg_epsilon_utilization,avg_historical_success_rate,avg_upload_ratio,residual_feedback_full_upload_count \
+    --output-dir results/grail_${dataset}_diagnostics_core \
+    --title-prefix "${dataset} GRAIL-FL Core Diagnostics"
+done
 ```
 
 To focus only on the low-resource tier, use `--tiers constrained`. For ablation input, use `--scenario-filter full,no_partial_updates` to summarize only selected scenarios:

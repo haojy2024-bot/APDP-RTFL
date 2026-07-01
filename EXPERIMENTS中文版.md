@@ -90,16 +90,83 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 该命令应输出 `True`。
 
-torch/GPU-GRAIL 基线命令如下：
+torch/GPU-GRAIL 四组论文数据集基线命令如下：
 
-```powershell
-python APDP-RTFL/main.py --experiment-suite baselines --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --run-name grail_main_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --min-epsilon 0.1 --max-epsilon 2 --dp-epsilon 1 --dp-delta 1e-5 --dp-l2-norm-clip 1 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  for seed in 42 43 44; do
+    python APDP-RTFL/main.py \
+      --experiment-suite baselines \
+      --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl \
+      --run-name grail_main_${dataset}_seed${seed} \
+      --dataset ${dataset} \
+      --emnist-split balanced \
+      --num-clients 20 \
+      --num-rounds 200 \
+      --client-epochs 3 \
+      --partition dirichlet \
+      --dirichlet-alpha 0.5 \
+      --epsilon-per-client-total 5 \
+      --min-epsilon 0.1 \
+      --max-epsilon 2 \
+      --dp-epsilon 1 \
+      --dp-delta 1e-5 \
+      --dp-l2-norm-clip 1 \
+      --dp-batch-size 256 \
+      --torch-batch-size 256 \
+      --backend torch \
+      --device cuda \
+      --heterogeneity-profile regulated_generic \
+      --round-deadline-seconds 5 \
+      --reference-batch-seconds 0.01 \
+      --parameter-blocks 8 \
+      --upload-ratios 1.0,0.5,0.25 \
+      --arpa-privacy-boost-gain 0.8 \
+      --arpa-max-privacy-boost 1.8 \
+      --arpa-opportunity-compensation-weight 0.65 \
+      --arpa-compression-slack-target 0.85 \
+      --arpa-residual-full-upload-threshold 0.25 \
+      --seed ${seed}
+  done
+done
 ```
 
 CUDA 是实验加速后端，不表示真实边缘客户端都具备 GPU。资源异构仍由 regulated resource profile 与 deadline simulation 控制。下方 sklearn/GRAIL 命令继续作为 CPU 兼容的参考路径，可用于后端一致性检查。
 
-```powershell
-python APDP-RTFL/main.py --experiment-suite baselines --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --run-name grail_main_emnist_seed42 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --min-epsilon 0.1 --max-epsilon 2 --dp-epsilon 1 --dp-delta 1e-5 --dp-l2-norm-clip 1 --backend sklearn --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  for seed in 42 43 44; do
+    python APDP-RTFL/main.py \
+      --experiment-suite baselines \
+      --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl \
+      --run-name grail_main_${dataset}_seed${seed} \
+      --dataset ${dataset} \
+      --emnist-split balanced \
+      --num-clients 20 \
+      --num-rounds 200 \
+      --client-epochs 3 \
+      --partition dirichlet \
+      --dirichlet-alpha 0.5 \
+      --epsilon-per-client-total 5 \
+      --min-epsilon 0.1 \
+      --max-epsilon 2 \
+      --dp-epsilon 1 \
+      --dp-delta 1e-5 \
+      --dp-l2-norm-clip 1 \
+      --backend sklearn \
+      --heterogeneity-profile regulated_generic \
+      --round-deadline-seconds 5 \
+      --reference-batch-seconds 0.01 \
+      --parameter-blocks 8 \
+      --upload-ratios 1.0,0.5,0.25 \
+      --arpa-privacy-boost-gain 0.8 \
+      --arpa-max-privacy-boost 1.8 \
+      --arpa-opportunity-compensation-weight 0.65 \
+      --arpa-compression-slack-target 0.85 \
+      --arpa-residual-full-upload-threshold 0.25 \
+      --seed ${seed}
+  done
+done
 ```
 
 主要输出为 `baseline_final_metrics.csv`、`baseline_summary.csv`、`baseline_comparison.png` 和 `baseline_method_metadata.csv`。其中元数据文件保存了论文比较表对应的代码侧配置记录：
@@ -234,12 +301,19 @@ python APDP-RTFL/main.py --experiment-suite ablation --ablation-method grail_fl 
 
 ## 8. 多随机种子汇总与论文主表
 
-每个正式命令应针对每一个 seed 单独运行，并保持稳定的命名前缀。新版 GRAIL-FL 主基线实验建议依次使用 `--run-name grail_main_emnist_seed42`、`grail_main_emnist_seed43` 和 `grail_main_emnist_seed44`；程序会自动产生如 `grail_main_emnist_seed42_20260625_123417` 的结果目录。准备论文最终主表时不要再使用旧 APDP 结果前缀。
+每个正式命令应针对每一个 dataset 和 seed 单独运行，并保持稳定的命名前缀。新版 GRAIL-FL 主基线实验建议使用 `grail_main_emnist_seed42`、`grail_main_femnist_seed42`、`grail_main_cifar10_seed42`、`grail_main_medmnist_seed42` 等名称；程序会自动追加时间戳。准备论文最终主表时不要再使用旧 APDP 结果前缀。
 
 在不修改原始基线目录的前提下进行汇总：
 
-```powershell
-python APDP-RTFL/aggregate_results.py --input-root results --run-pattern grail_main_emnist_seed* --input-file baseline_final_metrics.csv --output-dir results/grail_main_emnist_aggregate --title-prefix "EMNIST DP Baselines with GRAIL-FL"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_results.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --input-file baseline_final_metrics.csv \
+    --output-dir results/grail_main_${dataset}_aggregate \
+    --title-prefix "${dataset} DP Baselines with GRAIL-FL"
+done
 ```
 
 汇总器会生成三个 CSV 文件：
@@ -254,14 +328,27 @@ python APDP-RTFL/aggregate_results.py --input-root results --run-pattern grail_m
 
 GRAIL-FL 的资源层诊断需要单独汇总。该脚本读取每个运行目录下的 `grail_fl/tier_privacy_summary.csv` 和 `grail_fl/resource_privacy_diagnostics.csv`；若输入是消融实验目录，也会递归读取 `scenario/grail_fl/` 下的诊断文件：
 
-```powershell
-python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern grail_main_emnist_seed* --output-dir results/grail_emnist_diagnostics_aggregate --title-prefix "EMNIST GRAIL-FL Diagnostics"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_arpa_diagnostics.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --output-dir results/grail_${dataset}_diagnostics_aggregate \
+    --title-prefix "${dataset} GRAIL-FL Diagnostics"
+done
 ```
 
 正式验收时建议加入 `--require-complete`，使任何缺少 `tier_privacy_summary.csv` 的运行目录都会导致汇总失败，避免旧格式或失败运行被静默跳过：
 
-```powershell
-python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern grail_main_emnist_seed* --require-complete --output-dir results/grail_emnist_diagnostics_aggregate_strict --title-prefix "EMNIST GRAIL-FL Diagnostics"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_arpa_diagnostics.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --require-complete \
+    --output-dir results/grail_${dataset}_diagnostics_aggregate_strict \
+    --title-prefix "${dataset} GRAIL-FL Diagnostics"
+done
 ```
 
 主要输出包括：
@@ -276,8 +363,15 @@ python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-patter
 
 默认汇总指标包括 `avg_epsilon_utilization`、`avg_historical_success_rate`、`avg_deadline_feasible_rate`、`avg_noise_multiplier`、`avg_upload_ratio`、`avg_residual_pressure`、`compressed_selection_count` 和 `residual_feedback_full_upload_count`。若只关注论文主文中的核心治理指标，可显式指定：
 
-```powershell
-python APDP-RTFL/aggregate_arpa_diagnostics.py --input-root results --run-pattern grail_main_emnist_seed* --metrics avg_epsilon_utilization,avg_historical_success_rate,avg_upload_ratio,residual_feedback_full_upload_count --output-dir results/grail_emnist_diagnostics_core --title-prefix "EMNIST GRAIL-FL Core Diagnostics"
+```bash
+for dataset in emnist femnist cifar10 medmnist; do
+  python APDP-RTFL/aggregate_arpa_diagnostics.py \
+    --input-root results \
+    --run-pattern grail_main_${dataset}_seed* \
+    --metrics avg_epsilon_utilization,avg_historical_success_rate,avg_upload_ratio,residual_feedback_full_upload_count \
+    --output-dir results/grail_${dataset}_diagnostics_core \
+    --title-prefix "${dataset} GRAIL-FL Core Diagnostics"
+done
 ```
 
 如果只关注低资源层，可使用 `--tiers constrained`；如果输入目录是消融实验，可用 `--scenario-filter full,no_partial_updates` 只汇总指定场景：
