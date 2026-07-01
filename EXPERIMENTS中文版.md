@@ -588,6 +588,105 @@ python APDP-RTFL/main.py \
   --seed 42
 ```
 
+### S3：CNN torch 骨干上限探测
+
+若目标是将 EMNIST balanced 的 200 轮精度推向 `0.90`，必须先提高 no-DP 上限。当前 MLP no-DP 上限约为 `0.78`，因此继续只调隐私预算无法合理达到 `0.90`。S3 新增 `--torch-model cnn`，使用一个紧凑的两层 CNN。该阶段先只做 no-DP 小轮数探测，避免直接承担完整 DP-CNN 训练成本。
+
+S3 执行顺序：
+
+| 顺序 | 目标 | 方法 | 轮数 | 进入下一步条件 |
+| --- | --- | --- | ---: | --- |
+| A | CNN no-DP 快速上限 | `fedavg` | 50 | 明显超过同轮数 MLP，或达到 `0.75+` |
+| B | CNN no-DP 扩展上限 | `fedavg` | 100 | 接近或超过 `0.85` |
+| C | CNN 宽松 DP 候选 | `dp_fedavg` | 200 | no-DP CNN 已显示 `0.90` 潜力 |
+| D | CNN GRAIL-FL 候选 | `grail_fl` | 200 | DP-FedAvg CNN 已达到可接受精度 |
+
+S3-A：no-DP CNN 50 轮快速探测：
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods fedavg \
+  --run-name s3_cnn_upper_r50_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 50 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model cnn \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S3-B：no-DP CNN 100 轮上限确认：
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods fedavg \
+  --run-name s3_cnn_upper_r100_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 100 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model cnn \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S3-C：若 no-DP CNN 有 `0.90` 潜力，再运行宽松 DP-CNN：
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s3_cnn_relaxed_eps50_clip2_e5_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 5 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model cnn \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S3 判断规则：
+
+- 若 no-DP CNN 100 轮仍低于 `0.85`，不要继续跑 DP-CNN；应降低任务难度、调整数据 split，或接受 `0.70-0.80` 区间作为 EMNIST balanced 的合理主线。
+- 若 no-DP CNN 达到 `0.88-0.90`，再用同一骨干运行 DP-FedAvg 和 GRAIL-FL。
+- CNN 会显著增加训练时间，尤其是 DP-SGD 逐样本梯度裁剪，因此 S3 必须先做 no-DP 小轮数上限探测。
+
 torch/GPU-GRAIL 四组论文数据集基线命令如下：
 
 注意：以下命令中的 `--epsilon-per-client-total 5` 是紧预算参考值。若 S2.5-C3 选择了 `50` 或 `80` 作为正式效用优先预算，应把所有正式主表、参与、公平性、贡献、审计和消融命令中的 `--epsilon-per-client-total`、`--min-epsilon`、`--max-epsilon`、`--dp-l2-norm-clip`、`--client-epochs` 同步替换为校准后的统一配置。

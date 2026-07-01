@@ -72,8 +72,8 @@ def parse_args():
                         help="Torch device for --backend torch: auto, cpu, cuda, or cuda:0.")
     parser.add_argument("--torch-batch-size", type=int, default=256,
                         help="Mini-batch size for the torch backend.")
-    parser.add_argument("--torch-model", default="linear", choices=["linear", "mlp"],
-                        help="Torch model backbone. linear preserves historical softmax regression; mlp uses a small fully connected network.")
+    parser.add_argument("--torch-model", default="linear", choices=["linear", "mlp", "cnn"],
+                        help="Torch model backbone. linear preserves historical softmax regression; mlp uses a small fully connected network; cnn uses a compact image CNN.")
     parser.add_argument("--torch-mlp-hidden", default="256,128",
                         help="Comma-separated hidden layer sizes for --torch-model mlp.")
     parser.add_argument("--total-privacy-budget", type=float, default=TOTAL_PRIVACY_BUDGET,

@@ -70,6 +70,7 @@ class TorchLinearClient:
         self.random_state = random_state
         self.model_type = model_type
         self.mlp_hidden = tuple(int(v) for v in mlp_hidden)
+        self.image_shape = _infer_image_shape(num_features)
         self.dp_epsilon = privacy_config.dp_epsilon
         self.dp_delta = privacy_config.dp_delta
         self.dp_l2_norm_clip = privacy_config.dp_l2_norm_clip
@@ -96,6 +97,23 @@ class TorchLinearClient:
                 in_features = hidden
             layers.append(torch.nn.Linear(in_features, self.n_classes))
             return torch.nn.Sequential(*layers)
+        if self.model_type == "cnn":
+            channels, height, width = self.image_shape
+            if height < 4 or width < 4:
+                raise ValueError("--torch-model cnn requires image-like flattened input.")
+            return torch.nn.Sequential(
+                torch.nn.Unflatten(1, (channels, height, width)),
+                torch.nn.Conv2d(channels, 16, kernel_size=3, padding=1),
+                torch.nn.ReLU(),
+                torch.nn.MaxPool2d(2),
+                torch.nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                torch.nn.ReLU(),
+                torch.nn.MaxPool2d(2),
+                torch.nn.Flatten(),
+                torch.nn.Linear(32 * (height // 4) * (width // 4), 128),
+                torch.nn.ReLU(),
+                torch.nn.Linear(128, self.n_classes),
+            )
         raise ValueError(f"Unsupported torch model type: {self.model_type}")
 
     def _initialize_model(self):
@@ -108,6 +126,9 @@ class TorchLinearClient:
             for module in self.model.modules():
                 if isinstance(module, torch.nn.Linear):
                     torch.nn.init.xavier_uniform_(module.weight)
+                    module.bias.zero_()
+                elif isinstance(module, torch.nn.Conv2d):
+                    torch.nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
                     module.bias.zero_()
 
     def model_parameters(self):
@@ -181,8 +202,8 @@ class TorchLinearClient:
         generator = self._make_generator(10007 * int(round_num or 1))
         noise_std = float(noise_multiplier) * float(self.dp_l2_norm_clip)
 
-        if self.model_type == "mlp":
-            return self._train_mlp_with_dp_sgd(
+        if self.model_type in {"mlp", "cnn"}:
+            return self._train_functional_model_with_dp_sgd(
                 global_params, X, y, epochs, fedprox_mu, generator, noise_std
             )
 
@@ -224,11 +245,11 @@ class TorchLinearClient:
         proof = self.zkip.generate_proof(delta)
         return delta, proof
 
-    def _train_mlp_with_dp_sgd(self, global_params, X, y, epochs, fedprox_mu, generator, noise_std):
+    def _train_functional_model_with_dp_sgd(self, global_params, X, y, epochs, fedprox_mu, generator, noise_std):
         try:
             from torch.func import functional_call, grad, vmap
         except ImportError as exc:
-            raise RuntimeError("--torch-model mlp requires a PyTorch build with torch.func support.") from exc
+            raise RuntimeError("--torch-model mlp/cnn requires a PyTorch build with torch.func support.") from exc
 
         batch_size = min(max(1, int(self.dp_batch_size)), len(self.y_train))
         sample_rate = batch_size / max(1, len(self.y_train))
@@ -344,6 +365,19 @@ def _parse_mlp_hidden(value):
     return tuple(int(part.strip()) for part in str(value).split(",") if part.strip())
 
 
+def _infer_image_shape(num_features):
+    if num_features == 784:
+        return (1, 28, 28)
+    if num_features == 3072:
+        return (3, 32, 32)
+    side = int(round(float(num_features) ** 0.5))
+    if side * side == num_features:
+        return (1, side, side)
+    raise ValueError(
+        f"--torch-model cnn requires flattened square images or CIFAR-like 3072 features; got {num_features}."
+    )
+
+
 def _flatten_params(params):
     arrays = []
     for key in sorted(params):
@@ -397,6 +431,10 @@ def _evaluate_params(params, X_test, y_test, classes):
 def _predict_logits_from_params(params, X_data):
     if "coef_" in params and "intercept_" in params:
         return np.asarray(X_data, dtype=np.float32) @ params["coef_"].T + params["intercept_"]
+    if any(key.startswith("1.") and key.endswith(".weight") for key in params) and any(
+        key.startswith("4.") and key.endswith(".weight") for key in params
+    ):
+        return _predict_logits_from_torch_state(params, X_data)
     activations = np.asarray(X_data, dtype=np.float32)
     layer_indices = sorted(
         int(key.split(".")[0])
@@ -410,6 +448,44 @@ def _predict_logits_from_params(params, X_data):
         if layer_pos < len(linear_layers) - 1:
             activations = np.maximum(activations, 0.0)
     return activations
+
+
+def _predict_logits_from_torch_state(params, X_data):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    X_array = np.asarray(X_data, dtype=np.float32)
+    model = _build_eval_model_from_state(params, X_array.shape[1], device)
+    state = {key: torch.tensor(value, dtype=torch.float32, device=device) for key, value in params.items()}
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    logits = []
+    with torch.no_grad():
+        for start in range(0, X_array.shape[0], 1024):
+            batch = torch.tensor(X_array[start:start + 1024], dtype=torch.float32, device=device)
+            logits.append(model(batch).detach().cpu().numpy())
+    return np.vstack(logits)
+
+
+def _build_eval_model_from_state(params, num_features, device):
+    if any(key.startswith("1.") for key in params) and any(key.startswith("4.") for key in params):
+        channels, height, width = _infer_image_shape(num_features)
+        conv1_out = int(np.asarray(params["1.weight"]).shape[0])
+        conv2_out = int(np.asarray(params["4.weight"]).shape[0])
+        hidden = int(np.asarray(params["8.weight"]).shape[0])
+        n_classes = int(np.asarray(params["10.bias"]).shape[0])
+        return torch.nn.Sequential(
+            torch.nn.Unflatten(1, (channels, height, width)),
+            torch.nn.Conv2d(channels, conv1_out, kernel_size=3, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2),
+            torch.nn.Conv2d(conv1_out, conv2_out, kernel_size=3, padding=1),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool2d(2),
+            torch.nn.Flatten(),
+            torch.nn.Linear(conv2_out * (height // 4) * (width // 4), hidden),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden, n_classes),
+        ).to(device)
+    raise ValueError("Torch state dictionary does not match a supported CNN architecture.")
 
 
 def _resolve_device(device_arg):
@@ -488,7 +564,11 @@ def _run_single_torch_method(method_name, args, train_val_data, X_test, y_test, 
     client_ids = [client.client_id for client in clients]
     capabilities = _assign_capabilities(len(clients))
     server = FLServer(f"{method_name}_server", client_ids, num_features, classes=classes)
-    server.global_model_parameters = _initial_params(num_features, len(classes))
+    server.global_model_parameters = (
+        {key: np.copy(value) for key, value in clients[0].model_parameters().items()}
+        if clients and getattr(args, "torch_model", "linear") != "linear"
+        else _initial_params(num_features, len(classes))
+    )
     if config["use_ebcd"]:
         server.ebcd.establish_baseline([client.model_parameters() for client in clients])
 

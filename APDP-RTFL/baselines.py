@@ -978,6 +978,11 @@ def _predict_logits_from_torch_params(params, X_eval):
     if "coef_" in params and "intercept_" in params:
         logits = np.asarray(X_eval, dtype=np.float32) @ np.asarray(params["coef_"], dtype=np.float32).T
         return logits + np.asarray(params["intercept_"], dtype=np.float32)
+    if any(key.startswith("1.") and key.endswith(".weight") for key in params) and any(
+        key.startswith("4.") and key.endswith(".weight") for key in params
+    ):
+        from torch_baselines import _predict_logits_from_torch_state
+        return _predict_logits_from_torch_state(params, X_eval)
     activations = np.asarray(X_eval, dtype=np.float32)
     layer_indices = sorted(
         int(key.split(".")[0])

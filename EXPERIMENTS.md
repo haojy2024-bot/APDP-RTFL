@@ -588,6 +588,105 @@ python APDP-RTFL/main.py \
   --seed 42
 ```
 
+### S3: CNN Torch Backbone Upper-Bound Probe
+
+If the goal is to push EMNIST balanced toward `0.90` accuracy within about 200 rounds, first raise the no-DP upper bound. The current MLP no-DP upper bound is about `0.78`, so privacy-budget tuning alone cannot reasonably reach `0.90`. S3 adds `--torch-model cnn`, a compact two-convolution-layer CNN. Start with no-DP short-run probes before paying the full DP-CNN training cost.
+
+S3 order:
+
+| Order | Goal | Method | Rounds | Move on when |
+| --- | --- | --- | ---: | --- |
+| A | CNN no-DP quick upper bound | `fedavg` | 50 | Clearly beats same-round MLP or reaches `0.75+` |
+| B | CNN no-DP extended upper bound | `fedavg` | 100 | Near or above `0.85` |
+| C | CNN relaxed-DP candidate | `dp_fedavg` | 200 | no-DP CNN shows `0.90` potential |
+| D | CNN GRAIL-FL candidate | `grail_fl` | 200 | DP-FedAvg CNN reaches acceptable accuracy |
+
+S3-A: no-DP CNN 50-round quick probe:
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods fedavg \
+  --run-name s3_cnn_upper_r50_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 50 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model cnn \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S3-B: no-DP CNN 100-round upper-bound check:
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods fedavg \
+  --run-name s3_cnn_upper_r100_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 100 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model cnn \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S3-C: if no-DP CNN shows `0.90` potential, run relaxed-DP CNN:
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s3_cnn_relaxed_eps50_clip2_e5_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 5 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model cnn \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S3 decision rules:
+
+- If no-DP CNN at 100 rounds remains below `0.85`, do not continue to DP-CNN; reduce task difficulty, change the split, or accept `0.70-0.80` as the realistic EMNIST balanced main line.
+- If no-DP CNN reaches `0.88-0.90`, rerun DP-FedAvg and GRAIL-FL with the same backbone.
+- CNN will significantly increase training time, especially with per-sample DP-SGD clipping, so S3 must start with no-DP short-run upper-bound probes.
+
 Torch/GPU-GRAIL baseline commands for the four paper datasets:
 
 Note: `--epsilon-per-client-total 5` below is a tight-budget reference value. If S2.5-C3 selects `50` or `80` as the formal utility-first budget, replace `--epsilon-per-client-total`, `--min-epsilon`, `--max-epsilon`, `--dp-l2-norm-clip`, and `--client-epochs` consistently across all formal baseline, participation, fairness, contribution, audit, and ablation commands.
