@@ -63,7 +63,7 @@ def parse_args():
                         choices=["single", "baselines", "participation", "privacy_sensitivity", "pollution", "fairness", "synthetic_fairness", "contribution", "audit_trace", "ablation"],
                         help="single runs GRAIL-FL; comparison suites include baselines, participation, privacy_sensitivity, pollution, fairness, synthetic_fairness, contribution, audit_trace, and ablation.")
     parser.add_argument("--methods", default="all",
-                        help="Baseline methods: all or comma-separated dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl. Legacy keys such as dp_fl and apdp_rtfl remain accepted for compatibility.")
+                        help="Baseline methods: all or comma-separated dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl. Legacy keys such as dp_fl, apdp_rtfl, and dp_fedadam remain accepted for compatibility.")
     parser.add_argument("--fedprox-mu", type=float, default=0.01,
                         help="FedProx proximal coefficient. Default: 0.01.")
     parser.add_argument("--backend", default="sklearn", choices=["sklearn", "torch"],
@@ -126,11 +126,11 @@ def parse_args():
                         help="Participation policies: all,random,apdp_score.")
     parser.add_argument("--privacy-budgets", default="20,50,80,100",
                         help="Comma-separated total privacy budgets for privacy sensitivity experiments.")
-    parser.add_argument("--privacy-sensitivity-methods", default="dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl",
+    parser.add_argument("--privacy-sensitivity-methods", default="dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl",
                         help="Methods for privacy sensitivity experiments.")
     parser.add_argument("--enable-fairness-evaluation", action="store_true",
                         help="Enable client-level fairness evaluation in sklearn experiment suites.")
-    parser.add_argument("--fairness-methods", default="dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl",
+    parser.add_argument("--fairness-methods", default="dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl",
                         help="Methods for client-level fairness experiments.")
     parser.add_argument("--synthetic-sensitive-attrs", default="gender,age,region",
                         help="Synthetic client-level sensitive attributes for fairness pressure tests.")
@@ -140,7 +140,7 @@ def parse_args():
                         help="Datasets intended for synthetic fairness pressure tests.")
     parser.add_argument("--enable-contribution-evaluation", action="store_true",
                         help="Enable penalty and approximate Shapley contribution evaluation in sklearn experiment suites.")
-    parser.add_argument("--contribution-methods", default="dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl",
+    parser.add_argument("--contribution-methods", default="dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl",
                         help="Methods for penalty and Shapley contribution experiments.")
     parser.add_argument("--contribution-quality-weight", type=float, default=0.25,
                         help="Weight for data-quality score in the final contribution score.")

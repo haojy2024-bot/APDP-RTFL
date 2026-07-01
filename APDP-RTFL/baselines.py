@@ -35,15 +35,15 @@ DP_DELTA = 1e-5
 DP_L2_NORM_CLIP = 1.0
 BASE_LEARNING_RATE = 0.01
 EARLYSTOP_PATIENCE = 3
-BASELINE_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
-LEGACY_BASELINE_METHODS = ("dp_fl", "dp_flprox", "dp_fedsgd", "dp_rtfl", "apdp_rtfl")
+BASELINE_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fedsgd", "dp_fednova", "grail_fl")
+LEGACY_BASELINE_METHODS = ("dp_fl", "dp_flprox", "dp_rtfl", "apdp_rtfl", "dp_fedadam")
 SUPPORTED_BASELINE_METHODS = ("fedavg", "fedprox", "ldp_fl") + BASELINE_METHODS + LEGACY_BASELINE_METHODS
 PARTICIPATION_POLICIES = ("all", "random", "apdp_score")
-PRIVACY_SENSITIVITY_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
+PRIVACY_SENSITIVITY_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fedsgd", "dp_fednova", "grail_fl")
 POLLUTION_METHODS = ("grail_fl", "apdp_rtfl")
-FAIRNESS_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
-CONTRIBUTION_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
-AUDIT_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fednova", "dp_fedadam", "grail_fl")
+FAIRNESS_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fedsgd", "dp_fednova", "grail_fl")
+CONTRIBUTION_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fedsgd", "dp_fednova", "grail_fl")
+AUDIT_METHODS = ("dp_fedavg", "dp_fedprox", "dp_fedsgd", "dp_fednova", "grail_fl")
 ABLATION_SCENARIOS = (
     "full",
     "no_adaptive_privacy",

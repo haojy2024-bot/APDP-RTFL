@@ -9,7 +9,7 @@ import math
 import os
 
 
-DEFAULT_BASELINES = "dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam"
+DEFAULT_BASELINES = "dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova"
 DEFAULT_METRIC = "final_balanced_accuracy"
 
 

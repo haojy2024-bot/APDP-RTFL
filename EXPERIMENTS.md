@@ -70,7 +70,7 @@ Formal DP baseline experiments must list methods explicitly instead of using `--
 
 The main DP comparison set is:
 
-`DP-FedAvg`, `DP-FedProx`, `DP-FedNova`, `DP-FedAdam`, and the proposed `GRAIL-FL`. Legacy methods such as `dp_fl`, `dp_flprox`, `dp_fedsgd`, `ldp_fl`, `global_dp`, `dp_rtfl`, and `apdp_rtfl` remain explicitly runnable for older-result audits, but they should not be placed in the final main table.
+`DP-FedAvg`, `DP-FedProx`, `DP-FedSGD`, `DP-FedNova`, and the proposed `GRAIL-FL`. Legacy methods such as `dp_fl`, `dp_flprox`, `ldp_fl`, `global_dp`, `dp_rtfl`, `apdp_rtfl`, and `dp_fedadam` remain explicitly runnable for older-result audits, but they should not be placed in the final main table.
 
 ## Client-Side DP-SGD And Privacy Accounting
 
@@ -97,7 +97,7 @@ for dataset in emnist femnist cifar10 medmnist; do
   for seed in 42 43 44; do
     python APDP-RTFL/main.py \
       --experiment-suite baselines \
-      --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl \
+      --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
       --run-name grail_main_${dataset}_seed${seed} \
       --dataset ${dataset} \
       --emnist-split balanced \
@@ -138,7 +138,7 @@ for dataset in emnist femnist cifar10 medmnist; do
   for seed in 42 43 44; do
     python APDP-RTFL/main.py \
       --experiment-suite baselines \
-      --methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl \
+      --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
       --run-name grail_main_${dataset}_seed${seed} \
       --dataset ${dataset} \
       --emnist-split balanced \
@@ -175,8 +175,8 @@ Key outputs are `baseline_final_metrics.csv`, `baseline_summary.csv`, `baseline_
 | --- | --- | --- |
 | DP-FedAvg (`dp_fedavg`) | Client-side DP FedAvg | McMahan et al., AISTATS 2017; McMahan et al., ICLR 2018. |
 | DP-FedProx (`dp_fedprox`) | Client-side DP update plus FedProx proximal term | Li et al., *Federated optimization in heterogeneous networks*, MLSys, 2020. |
+| DP-FedSGD (`dp_fedsgd`) | Client-side DP with forced one-local-epoch FedSGD-style updates | McMahan et al., ICLR 2018; FedSGD-style one-step FL baseline. |
 | DP-FedNova (`dp_fednova`) | Client-side DP with normalized aggregation for heterogeneous local steps | Wang et al., *Tackling the Objective Inconsistency Problem in Heterogeneous Federated Optimization*, NeurIPS, 2020. |
-| DP-FedAdam (`dp_fedadam`) | Client-side DP with server-side adaptive FedOpt aggregation | Reddi et al., *Adaptive Federated Optimization*, ICLR, 2021. |
 | GRAIL-FL (`grail_fl`) | Client-side DP plus regulated resource-privacy-governance orchestration | Proposed method; must enable `regulated_generic`. |
 
 Legacy baselines remain available for reproducibility checks, but the final main table should use only the five methods above.
@@ -192,13 +192,13 @@ python APDP-RTFL/main.py --experiment-suite participation --participation-polici
 Privacy-budget sensitivity:
 
 ```powershell
-python APDP-RTFL/main.py --experiment-suite privacy_sensitivity --privacy-budgets 20,50,80,100 --privacy-sensitivity-methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --run-name privacy_sensitivity_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+python APDP-RTFL/main.py --experiment-suite privacy_sensitivity --privacy-budgets 20,50,80,100 --privacy-sensitivity-methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl --run-name privacy_sensitivity_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
 ```
 
 Client-level fairness:
 
 ```powershell
-python APDP-RTFL/main.py --experiment-suite fairness --fairness-methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --run-name fairness_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+python APDP-RTFL/main.py --experiment-suite fairness --fairness-methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl --run-name fairness_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
 ```
 
 ## 2. Regulatory Intervention
@@ -234,7 +234,7 @@ Report the utility change, detection rate, false positive rate, and false negati
 This is a client-level synthetic stress test, not an evaluation of real demographic fairness. It creates linked differences in sample coverage, label distribution, feature quality, participation stability, and compute capability.
 
 ```powershell
-python APDP-RTFL/main.py --experiment-suite synthetic_fairness --fairness-datasets emnist --fairness-methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --synthetic-sensitive-attrs gender,age,region --fairness-pressure-profile regulated --run-name synthetic_fairness_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+python APDP-RTFL/main.py --experiment-suite synthetic_fairness --fairness-datasets emnist --fairness-methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl --synthetic-sensitive-attrs gender,age,region --fairness-pressure-profile regulated --run-name synthetic_fairness_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
 ```
 
 For FEMNIST, CIFAR10, and CIFAR100, first generate `data/<dataset>/all_data`, then replace `--fairness-datasets emnist` with the requested comma-separated datasets. Main outputs: `synthetic_sensitive_clients.csv`, `synthetic_group_fairness_summary.csv`, `federated_group_fairness_summary.csv`, and the group fairness charts.
@@ -246,7 +246,7 @@ Suggested manuscript wording: this study uses client-level synthetic sensitive a
 The contribution evaluator uses leave-one-out marginal utility as an approximate Shapley value. In the manuscript, call it an approximate Shapley value or leave-one-out marginal contribution, not an exact Shapley computation.
 
 ```powershell
-python APDP-RTFL/main.py --experiment-suite contribution --contribution-methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --contribution-quality-weight 0.25 --contribution-shapley-weight 0.35 --contribution-risk-weight 0.30 --contribution-fairness-weight 0.10 --contribution-utility-metric balanced_accuracy --enable-regulatory-intervention --run-name contribution_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+python APDP-RTFL/main.py --experiment-suite contribution --contribution-methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl --contribution-quality-weight 0.25 --contribution-shapley-weight 0.35 --contribution-risk-weight 0.30 --contribution-fairness-weight 0.10 --contribution-utility-metric balanced_accuracy --enable-regulatory-intervention --run-name contribution_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
 ```
 
 Use `contribution_penalty_summary.csv`, `approx_shapley_by_client.png`, `penalty_components.png`, and `contribution_weight_alignment.png` to discuss the balance between data quality, regulatory-risk penalties, fairness penalties, and aggregation weights.
@@ -256,7 +256,7 @@ Use `contribution_penalty_summary.csv`, `approx_shapley_by_client.png`, `penalty
 This suite automatically records a client-by-round SHA-256 hash chain and records regulatory, fairness, and contribution observations during the normal GRAIL-FL training process.
 
 ```powershell
-python APDP-RTFL/main.py --experiment-suite audit_trace --audit-methods dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam,grail_fl --audit-digest-algorithm sha256 --run-name audit_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
+python APDP-RTFL/main.py --experiment-suite audit_trace --audit-methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl --audit-digest-algorithm sha256 --run-name audit_emnist_seed42_grail --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --dp-batch-size 256 --torch-batch-size 256 --backend torch --device cuda --heterogeneity-profile regulated_generic --round-deadline-seconds 5 --reference-batch-seconds 0.01 --parameter-blocks 8 --upload-ratios 1.0,0.5,0.25 --arpa-privacy-boost-gain 0.8 --arpa-max-privacy-boost 1.8 --arpa-opportunity-compensation-weight 0.65 --arpa-compression-slack-target 0.85 --arpa-residual-full-upload-threshold 0.25 --seed 42
 ```
 
 Report `audit_trace_summary.csv`, `audit_chain_verification.csv`, `audit_trace_log.csv`, and `audit_trace_timeline.png`. The verification table should show zero invalid chain links in a successful run.
@@ -391,7 +391,7 @@ python APDP-RTFL/aggregate_results.py --input-root results --run-pattern polluti
 After a method comparison containing GRAIL-FL and DP baselines finishes, use the acceptance script to check whether the run meets the pre-specified conditions. The script does not change raw training artifacts; it writes check tables into an independent output directory.
 
 ```powershell
-python APDP-RTFL/validate_arpa_acceptance.py --run-dir results/grail_main_emnist_seed42_YYYYmmdd_HHMMSS --metric final_balanced_accuracy --baselines dp_fedavg,dp_fedprox,dp_fednova,dp_fedadam --require-all-baselines --min-win-margin 0.0 --min-epsilon-utilization 0.70 --min-constrained-success-rate 0.50 --max-deadline-failure-rate 0.20 --output-dir results/grail_main_emnist_seed42_acceptance
+python APDP-RTFL/validate_arpa_acceptance.py --run-dir results/grail_main_emnist_seed42_YYYYmmdd_HHMMSS --metric final_balanced_accuracy --baselines dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova --require-all-baselines --min-win-margin 0.0 --min-epsilon-utilization 0.70 --min-constrained-success-rate 0.50 --max-deadline-failure-rate 0.20 --output-dir results/grail_main_emnist_seed42_acceptance
 ```
 
 Acceptance checks:
