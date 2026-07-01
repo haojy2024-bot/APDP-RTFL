@@ -92,7 +92,7 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ### S2：模型容量与隐私强度诊断
 
-在继续正式主表实验前，应先用同一数据划分、同一客户端数和同一模型骨干做三组诊断。该阶段的目的不是生成论文主表，而是判断当前 `0.5-0.6` 精度主要来自模型容量不足、DP 噪声过强，还是 GRAIL-FL 调度策略。为节省计算资源，S2 诊断阶段只使用一组随机种子，默认 `seed=42`；只有当某组配置表现合理并准备进入正式主表时，再扩展到 `42/43/44` 多随机种子。建议优先在 EMNIST balanced 上执行，若 FEMNIST 仍异常，再单独降低 FEMNIST 难度做补充诊断。
+在继续正式主表实验前，应先用同一数据划分、同一客户端数和同一模型骨干做诊断。该阶段的目的不是生成论文主表，而是判断当前 `0.5-0.6` 精度主要来自模型容量不足、DP 噪声过强，还是 GRAIL-FL 调度策略。本文不强制采用固定 `epsilon=5` 作为最终隐私预算；隐私预算作为可调实验变量，正式主表应使用经校准后能够稳定收敛的统一预算，并在表头和正文中明确报告。为节省计算资源，S2 诊断阶段只使用一组随机种子，默认 `seed=42`；只有当某组配置表现合理并准备进入正式主表时，再扩展到 `42/43/44` 多随机种子。建议优先在 EMNIST balanced 上执行，若 FEMNIST 仍异常，再单独降低 FEMNIST 难度做补充诊断。
 
 诊断命名规则：
 
@@ -100,7 +100,7 @@ python -c "import torch; print(torch.cuda.is_available())"
 | --- | --- | --- | --- | --- |
 | no-DP 上限 | 判断 MLP 在当前 FL 划分下的可达上限 | `fedavg,fedprox` | 不使用客户端 DP | `s2_upper_${dataset}_seed42` |
 | 弱 DP | 判断较宽松 DP 下是否接近 no-DP 上限 | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=20` | `s2_weakdp_${dataset}_seed42` |
-| 强 DP | 判断正式预算下的可发表性能 | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=5` | `s2_strongdp_${dataset}_seed42` |
+| 紧预算参考 DP | 判断较严格预算下的性能下界，不作为强制主表预算 | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=5` | `s2_tightdp_${dataset}_seed42` |
 
 no-DP 上限诊断：
 
@@ -168,13 +168,13 @@ python APDP-RTFL/main.py \
   --seed 42
 ```
 
-强 DP 诊断：
+紧预算参考 DP 诊断：
 
 ```bash
 python APDP-RTFL/main.py \
   --experiment-suite baselines \
   --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-  --run-name s2_strongdp_emnist_seed42 \
+  --run-name s2_tightdp_emnist_seed42 \
   --dataset emnist \
   --emnist-split balanced \
   --num-clients 20 \
@@ -211,14 +211,14 @@ python APDP-RTFL/main.py \
 解释规则：
 
 - 若 no-DP 上限仍低于 0.70，说明主要瓶颈不是 DP，而是模型容量、数据划分或训练强度；应先调整模型或任务设置。
-- 若 no-DP 明显高于 0.70，而弱 DP 接近 no-DP，说明模型容量已经足够，正式预算下的精度损失主要来自 DP 噪声。
-- 若弱 DP 明显高于强 DP，优先调 `dp-l2-norm-clip`、`dp-batch-size`、本地 epoch 和 GRAIL-FL 隐私调度，而不是放宽正式主表预算。
-- 若 GRAIL-FL 在弱 DP 和强 DP 中都低于固定 DP 基线，应先降低 `arpa-privacy-boost-gain` 和 `arpa-max-privacy-boost`，避免预算利用率提升被更大噪声抵消。
-- S2 诊断结果只能用于选择正式实验配置；正式主表仍应使用同一模型骨干、同一隐私预算、同一数据划分和同一 seed 集。
+- 若 no-DP 明显高于 0.70，而弱 DP 接近 no-DP，说明模型容量已经足够，校准预算下的精度损失主要来自 DP 噪声。
+- 若弱 DP 明显高于紧预算参考 DP，说明模型对隐私预算敏感；正式主表应优先选择能够保证收敛的统一预算，再把较严格预算作为敏感性分析呈现。
+- 若 GRAIL-FL 在弱 DP 和紧预算参考 DP 中都低于固定 DP 基线，应先降低 `arpa-privacy-boost-gain` 和 `arpa-max-privacy-boost`，避免预算利用率提升被更大噪声抵消。
+- S2 诊断结果只能用于选择正式实验配置；正式主表仍应使用同一模型骨干、同一经校准隐私预算、同一数据划分和同一 seed 集。
 
 ### S2.5：弱 DP 可训练性调参
 
-若 S2 出现 no-DP 上限已经超过 `0.70`，但弱 DP `epsilon=20` 仍低于 `0.60` 的情况，不要直接进入强 DP 诊断，也不要扩展到多随机种子。S2.5 只使用一组随机种子 `seed=42`，目标是在不改变数据集、客户端数、划分方式和模型骨干的前提下，判断弱 DP 低精度来自训练轮数不足、DP-SGD 裁剪过强、batch 太小，还是 GRAIL-FL 调度未触发。
+若 S2 出现 no-DP 上限已经超过 `0.70`，但弱 DP `epsilon=20` 仍低于 `0.60` 的情况，不要直接进入正式主表，也不要扩展到多随机种子。S2.5 只使用一组随机种子 `seed=42`，目标是在不改变数据集、客户端数、划分方式和模型骨干的前提下，找到能够稳定收敛的隐私预算、裁剪阈值和本地训练强度。
 
 S2.5 的执行顺序如下：
 
@@ -233,9 +233,9 @@ S2.5 的执行顺序如下：
 
 - 每条命令仍只使用 `--seed 42`。
 - 每次只跑一个方法或一个配置，避免一次中断导致整批结果不可用。
-- 若 `dp_fedavg` 在 S2.5 仍低于 `0.60`，先不要继续强 DP；应检查 DP-SGD 实现、梯度裁剪和噪声记录。
+- 若 `dp_fedavg` 在 S2.5 仍低于 `0.60`，先不要进入正式主表；应检查 DP-SGD 实现、梯度裁剪和噪声记录，或进一步放宽隐私预算。
 - 若 `dp_fedavg` 达到 `0.65-0.70`，再用同一配置跑 `grail_fl`。
-- 若 `grail_fl` 与固定 DP 基线精度相近，但在 epsilon 利用、deadline、上传比例或公平性指标上更优，可进入强 DP 单种子诊断。
+- 若 `grail_fl` 与固定 DP 基线精度相近，但在 epsilon 利用、deadline、上传比例或公平性指标上更优，可进入正式主表候选配置复跑。
 
 #### S2.5-A：补齐弱 DP 缺失方法
 
@@ -442,9 +442,155 @@ S2.5 通过标准：
 - 弱 DP `dp_fedavg` 或 `grail_fl` 最终 accuracy 达到 `0.65` 以上，且 macro-F1 同步提升。
 - 平均最终 epsilon 接近 `20`，预算耗尽事件为 `0`。
 - GRAIL-FL 若参与比较，应至少满足 `compressed_selection_count > 0` 或在资源/隐私利用指标上能解释其机制贡献。
-- 通过后再进入强 DP 单种子诊断；未通过则优先检查 DP-SGD 噪声实现和裁剪统计。
+- 通过后再进入正式主表候选配置复跑；未通过则优先检查 DP-SGD 噪声实现和裁剪统计，或进入 S2.5-C3 宽松隐私校准。
+
+#### S2.5-C3：200 轮宽松隐私与强本地训练校准
+
+若时间受限，且目标是在 200 轮左右先达到约 `0.70` 的可训练精度，可跳过 400 轮网格，改做宽松隐私校准。该阶段仍只使用 `seed=42`，先用 `dp_fedavg` 找到可训练配置，再用同一配置运行 `grail_fl`。注意：该阶段属于 utility-oriented relaxed-DP calibration，论文中必须明确报告实际 `epsilon_per_client_total`；若该预算被选为正式主表预算，所有主表方法必须使用同一预算公平比较。
+
+运行原则：
+
+- 优先放宽总体隐私预算：从 `epsilon_per_client_total=50` 开始；若仍低于 `0.68`，再试 `80`。
+- 优先保留 `num_rounds=200`，通过 `client_epochs=8` 和 `dp_l2_norm_clip=2/3` 增强本地训练。
+- 优先使用 `dp_batch_size=256`，因为 S2.5-C 表明 batch512 在当前实现下并不稳定。
+- 一旦 `dp_fedavg` 达到 `0.68-0.72`，立即停止继续放宽，并用相同配置运行 `grail_fl`。
+
+优先命令 1：`epsilon=50, clip=2, epochs=8`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_c3_relaxed_eps50_clip2_e8_dpfedavg_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+优先命令 2：`epsilon=50, clip=3, epochs=8`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_c3_relaxed_eps50_clip3_e8_dpfedavg_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 3 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+优先命令 3：`epsilon=80, clip=2, epochs=8`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_c3_relaxed_eps80_clip2_e8_dpfedavg_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 80 \
+  --min-epsilon 0.2 \
+  --max-epsilon 15 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+优先命令 4：若 `dp_fedavg` 达到目标，用同配置运行 `grail_fl`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods grail_fl \
+  --run-name s2_5_c3_relaxed_eps50_clip2_e8_grail_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
 
 torch/GPU-GRAIL 四组论文数据集基线命令如下：
+
+注意：以下命令中的 `--epsilon-per-client-total 5` 是紧预算参考值。若 S2.5-C3 选择了 `50` 或 `80` 作为正式效用优先预算，应把所有正式主表、参与、公平性、贡献、审计和消融命令中的 `--epsilon-per-client-total`、`--min-epsilon`、`--max-epsilon`、`--dp-l2-norm-clip`、`--client-epochs` 同步替换为校准后的统一配置。
 
 ```bash
 for dataset in emnist femnist cifar10 medmnist; do

@@ -92,7 +92,7 @@ The command should print `True`.
 
 ### S2: Model-Capacity And Privacy-Strength Diagnostics
 
-Before continuing formal main-table experiments, run three diagnostics with the same data partition, client count, and model backbone. This stage is not the paper main table; it determines whether the current `0.5-0.6` accuracy is primarily caused by model capacity, DP noise, or GRAIL-FL scheduling. To save compute, S2 diagnostics use one random seed only, defaulting to `seed=42`; expand to `42/43/44` only after a configuration is promising enough for the formal main table. Start with EMNIST balanced. If FEMNIST remains abnormal, diagnose FEMNIST separately with reduced task difficulty.
+Before continuing formal main-table experiments, run diagnostics with the same data partition, client count, and model backbone. This stage is not the paper main table; it determines whether the current `0.5-0.6` accuracy is primarily caused by model capacity, DP noise, or GRAIL-FL scheduling. This paper does not force a fixed `epsilon=5` final privacy budget; privacy is an adjustable experimental variable. The formal main table should use a calibrated unified budget that converges reliably, and the table header and text must report that budget explicitly. To save compute, S2 diagnostics use one random seed only, defaulting to `seed=42`; expand to `42/43/44` only after a configuration is promising enough for the formal main table. Start with EMNIST balanced. If FEMNIST remains abnormal, diagnose FEMNIST separately with reduced task difficulty.
 
 Diagnostic naming:
 
@@ -100,7 +100,7 @@ Diagnostic naming:
 | --- | --- | --- | --- | --- |
 | no-DP upper bound | Estimate the MLP upper bound under the current FL split | `fedavg,fedprox` | no client DP | `s2_upper_${dataset}_seed42` |
 | weak DP | Check whether relaxed DP approaches the no-DP upper bound | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=20` | `s2_weakdp_${dataset}_seed42` |
-| strong DP | Check publishable performance under the formal budget | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=5` | `s2_strongdp_${dataset}_seed42` |
+| tight-budget reference DP | Estimate the lower-bound performance under a stricter budget; not a mandatory main-table budget | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=5` | `s2_tightdp_${dataset}_seed42` |
 
 No-DP upper-bound diagnostic:
 
@@ -168,13 +168,13 @@ python APDP-RTFL/main.py \
   --seed 42
 ```
 
-Strong-DP diagnostic:
+Tight-budget reference DP diagnostic:
 
 ```bash
 python APDP-RTFL/main.py \
   --experiment-suite baselines \
   --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-  --run-name s2_strongdp_emnist_seed42 \
+  --run-name s2_tightdp_emnist_seed42 \
   --dataset emnist \
   --emnist-split balanced \
   --num-clients 20 \
@@ -212,13 +212,13 @@ Interpretation rules:
 
 - If the no-DP upper bound remains below 0.70, the main bottleneck is model capacity, data partitioning, or training intensity rather than DP.
 - If no-DP is clearly above 0.70 and weak DP is close to no-DP, the model capacity is adequate and the formal-budget gap is mainly a DP-noise effect.
-- If weak DP is much better than strong DP, tune `dp-l2-norm-clip`, `dp-batch-size`, local epochs, and GRAIL-FL privacy scheduling before relaxing the formal main-table budget.
-- If GRAIL-FL is below fixed DP baselines in both weak and strong DP, reduce `arpa-privacy-boost-gain` and `arpa-max-privacy-boost` so budget utilization gains are not canceled by larger noise.
-- S2 diagnostics are only for choosing the formal configuration. The final main table must still use the same backbone, privacy budget, data split, and seed set across methods.
+- If weak DP is much better than tight-budget reference DP, the model is privacy-budget sensitive; choose a unified budget that guarantees convergence for the formal main table, then present stricter budgets as sensitivity analysis.
+- If GRAIL-FL is below fixed DP baselines in both weak and tight-budget reference DP, reduce `arpa-privacy-boost-gain` and `arpa-max-privacy-boost` so budget utilization gains are not canceled by larger noise.
+- S2 diagnostics are only for choosing the formal configuration. The final main table must still use the same backbone, calibrated privacy budget, data split, and seed set across methods.
 
 ### S2.5: Weak-DP Trainability Tuning
 
-If S2 shows that the no-DP upper bound is already above `0.70` but weak DP with `epsilon=20` remains below `0.60`, do not move directly to strong-DP diagnostics and do not expand to multiple random seeds. S2.5 uses one random seed only, `seed=42`, and keeps the dataset, client count, partition, and model backbone fixed. Its purpose is to determine whether weak-DP underperformance comes from too few rounds, overly aggressive DP-SGD clipping, too small a batch size, or inactive GRAIL-FL scheduling.
+If S2 shows that the no-DP upper bound is already above `0.70` but weak DP with `epsilon=20` remains below `0.60`, do not move directly to the formal main table and do not expand to multiple random seeds. S2.5 uses one random seed only, `seed=42`, and keeps the dataset, client count, partition, and model backbone fixed. Its purpose is to find the privacy budget, clipping threshold, and local training intensity that converge reliably.
 
 Run S2.5 in this order:
 
@@ -233,9 +233,9 @@ Execution rules:
 
 - Every command still uses only `--seed 42`.
 - Run one method or one configuration at a time so an interruption does not invalidate a whole batch.
-- If `dp_fedavg` remains below `0.60` in S2.5, do not continue to strong DP; inspect DP-SGD implementation, gradient clipping, and noise logging first.
+- If `dp_fedavg` remains below `0.60` in S2.5, do not continue to the formal main table; inspect DP-SGD implementation, gradient clipping, and noise logging first, or relax the privacy budget further.
 - If `dp_fedavg` reaches `0.65-0.70`, rerun `grail_fl` with the same configuration.
-- If `grail_fl` has similar accuracy to fixed DP baselines but better epsilon utilization, deadline behavior, upload ratio, or fairness metrics, proceed to strong-DP single-seed diagnostics.
+- If `grail_fl` has similar accuracy to fixed DP baselines but better epsilon utilization, deadline behavior, upload ratio, or fairness metrics, proceed to candidate main-table reruns.
 
 #### S2.5-A: Complete Missing Weak-DP Methods
 
@@ -442,9 +442,155 @@ S2.5 pass criteria:
 - Weak-DP `dp_fedavg` or `grail_fl` final accuracy is above `0.65`, with macro-F1 improving as well.
 - Average final epsilon is close to `20`, with `0` budget-exhausted events.
 - If GRAIL-FL is included, it should have `compressed_selection_count > 0` or a clear mechanism advantage in resource/privacy-utilization metrics.
-- Only after passing S2.5 should you run strong-DP single-seed diagnostics; otherwise inspect DP-SGD noise implementation and clipping statistics first.
+- Only after passing S2.5 should you run candidate main-table reruns; otherwise inspect DP-SGD noise implementation and clipping statistics first, or enter S2.5-C3 relaxed-privacy calibration.
+
+#### S2.5-C3: 200-Round Relaxed-Privacy And Strong-Local-Training Calibration
+
+If time is tight and the immediate goal is to reach about `0.70` accuracy within roughly 200 rounds, skip the 400-round grid and run a relaxed-privacy calibration. This stage still uses `seed=42`; first find a trainable `dp_fedavg` setting, then rerun `grail_fl` with the same setting. This is utility-oriented relaxed-DP calibration: the paper must report the actual `epsilon_per_client_total`. If this budget is selected for the formal main table, all main-table methods must use the same budget for a fair comparison.
+
+Rules:
+
+- Relax the total privacy budget first: start with `epsilon_per_client_total=50`; if accuracy is still below `0.68`, try `80`.
+- Keep `num_rounds=200`; use `client_epochs=8` and `dp_l2_norm_clip=2/3` to strengthen local training.
+- Prefer `dp_batch_size=256`, because S2.5-C showed that batch512 is unstable in the current implementation.
+- Once `dp_fedavg` reaches `0.68-0.72`, stop further relaxation and rerun `grail_fl` with the same setting.
+
+Priority command 1: `epsilon=50, clip=2, epochs=8`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_c3_relaxed_eps50_clip2_e8_dpfedavg_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+Priority command 2: `epsilon=50, clip=3, epochs=8`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_c3_relaxed_eps50_clip3_e8_dpfedavg_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 3 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+Priority command 3: `epsilon=80, clip=2, epochs=8`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_c3_relaxed_eps80_clip2_e8_dpfedavg_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 80 \
+  --min-epsilon 0.2 \
+  --max-epsilon 15 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+Priority command 4: if `dp_fedavg` reaches the target, rerun `grail_fl`
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods grail_fl \
+  --run-name s2_5_c3_relaxed_eps50_clip2_e8_grail_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 8 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 50 \
+  --min-epsilon 0.2 \
+  --max-epsilon 10 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
 
 Torch/GPU-GRAIL baseline commands for the four paper datasets:
+
+Note: `--epsilon-per-client-total 5` below is a tight-budget reference value. If S2.5-C3 selects `50` or `80` as the formal utility-first budget, replace `--epsilon-per-client-total`, `--min-epsilon`, `--max-epsilon`, `--dp-l2-norm-clip`, and `--client-epochs` consistently across all formal baseline, participation, fairness, contribution, audit, and ablation commands.
 
 ```bash
 for dataset in emnist femnist cifar10 medmnist; do
