@@ -80,7 +80,7 @@ The expected local DP-SGD batch size is 256 and can be changed through `--dp-bat
 
 ## PyTorch/GPU Backend
 
-Use `--backend torch --device cuda` to run the linear softmax/logistic client model, local client training tensors, per-sample gradient clipping, and Gaussian DP-SGD noise generation on the GPU. When combined with `--heterogeneity-profile regulated_generic`, torch uses the same full GRAIL-FL runner as sklearn across the paper experiment suites: resource orchestration, client selection, privacy spending, partial upload, RDP accounting, ZKIP/EBCD/TCM, regulatory intervention, contribution scoring, audit traceability, and mechanism diagnostics keep the same semantics. For CUDA paper runs, use `--dp-batch-size 256 --torch-batch-size 256` together with the regulated resource profile.
+Use `--backend torch --device cuda` to run the client model, local client training tensors, per-sample gradient clipping, and Gaussian DP-SGD noise generation on the GPU. The default `--torch-model linear` preserves the historical linear softmax/logistic model; use `--torch-model mlp --torch-mlp-hidden 256,128` to diagnose model-capacity limits with a small fully connected network. When combined with `--heterogeneity-profile regulated_generic`, torch uses the same full GRAIL-FL runner as sklearn across the paper experiment suites: resource orchestration, client selection, privacy spending, partial upload, RDP accounting, ZKIP/EBCD/TCM, regulatory intervention, contribution scoring, audit traceability, and mechanism diagnostics keep the same semantics. For CUDA paper runs, use `--dp-batch-size 256 --torch-batch-size 256` together with the regulated resource profile.
 
 Install a CUDA-enabled PyTorch build on the experiment server before using this backend, then verify the device:
 
@@ -89,6 +89,138 @@ python -c "import torch; print(torch.cuda.is_available())"
 ```
 
 The command should print `True`.
+
+### S2: Model-Capacity And Privacy-Strength Diagnostics
+
+Before continuing formal main-table experiments, run three diagnostics with the same data partition, client count, and model backbone. This stage is not the paper main table; it determines whether the current `0.5-0.6` accuracy is primarily caused by model capacity, DP noise, or GRAIL-FL scheduling. Start with EMNIST balanced. If FEMNIST remains abnormal, diagnose FEMNIST separately with reduced task difficulty.
+
+Diagnostic naming:
+
+| Diagnostic | Purpose | Methods | Privacy budget | Recommended prefix |
+| --- | --- | --- | --- | --- |
+| no-DP upper bound | Estimate the MLP upper bound under the current FL split | `fedavg,fedprox` | no client DP | `s2_upper_${dataset}_seed${seed}` |
+| weak DP | Check whether relaxed DP approaches the no-DP upper bound | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=20` | `s2_weakdp_${dataset}_seed${seed}` |
+| strong DP | Check publishable performance under the formal budget | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=5` | `s2_strongdp_${dataset}_seed${seed}` |
+
+No-DP upper-bound diagnostic:
+
+```bash
+for seed in 42 43 44; do
+  python APDP-RTFL/main.py \
+    --experiment-suite baselines \
+    --methods fedavg,fedprox \
+    --run-name s2_upper_emnist_seed${seed} \
+    --dataset emnist \
+    --emnist-split balanced \
+    --num-clients 20 \
+    --num-rounds 200 \
+    --client-epochs 3 \
+    --partition dirichlet \
+    --dirichlet-alpha 0.5 \
+    --epsilon-per-client-total 5 \
+    --dp-batch-size 256 \
+    --torch-batch-size 256 \
+    --backend torch \
+    --device cuda \
+    --torch-model mlp \
+    --torch-mlp-hidden 256,128 \
+    --heterogeneity-profile regulated_generic \
+    --failure-prob 0 \
+    --seed ${seed}
+done
+```
+
+Weak-DP diagnostic:
+
+```bash
+for seed in 42 43 44; do
+  python APDP-RTFL/main.py \
+    --experiment-suite baselines \
+    --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
+    --run-name s2_weakdp_emnist_seed${seed} \
+    --dataset emnist \
+    --emnist-split balanced \
+    --num-clients 20 \
+    --num-rounds 200 \
+    --client-epochs 3 \
+    --partition dirichlet \
+    --dirichlet-alpha 0.5 \
+    --epsilon-per-client-total 20 \
+    --min-epsilon 0.1 \
+    --max-epsilon 4 \
+    --dp-epsilon 1 \
+    --dp-delta 1e-5 \
+    --dp-l2-norm-clip 1 \
+    --dp-batch-size 256 \
+    --torch-batch-size 256 \
+    --backend torch \
+    --device cuda \
+    --torch-model mlp \
+    --torch-mlp-hidden 256,128 \
+    --heterogeneity-profile regulated_generic \
+    --round-deadline-seconds 5 \
+    --reference-batch-seconds 0.01 \
+    --parameter-blocks 8 \
+    --upload-ratios 1.0,0.5,0.25 \
+    --arpa-privacy-boost-gain 0.5 \
+    --arpa-max-privacy-boost 1.5 \
+    --arpa-opportunity-compensation-weight 0.65 \
+    --arpa-compression-slack-target 0.85 \
+    --arpa-residual-full-upload-threshold 0.25 \
+    --failure-prob 0 \
+    --seed ${seed}
+done
+```
+
+Strong-DP diagnostic:
+
+```bash
+for seed in 42 43 44; do
+  python APDP-RTFL/main.py \
+    --experiment-suite baselines \
+    --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
+    --run-name s2_strongdp_emnist_seed${seed} \
+    --dataset emnist \
+    --emnist-split balanced \
+    --num-clients 20 \
+    --num-rounds 200 \
+    --client-epochs 3 \
+    --partition dirichlet \
+    --dirichlet-alpha 0.5 \
+    --epsilon-per-client-total 5 \
+    --min-epsilon 0.1 \
+    --max-epsilon 2 \
+    --dp-epsilon 1 \
+    --dp-delta 1e-5 \
+    --dp-l2-norm-clip 1 \
+    --dp-batch-size 256 \
+    --torch-batch-size 256 \
+    --backend torch \
+    --device cuda \
+    --torch-model mlp \
+    --torch-mlp-hidden 256,128 \
+    --heterogeneity-profile regulated_generic \
+    --round-deadline-seconds 5 \
+    --reference-batch-seconds 0.01 \
+    --parameter-blocks 8 \
+    --upload-ratios 1.0,0.5,0.25 \
+    --arpa-privacy-boost-gain 0.5 \
+    --arpa-max-privacy-boost 1.5 \
+    --arpa-opportunity-compensation-weight 0.65 \
+    --arpa-compression-slack-target 0.85 \
+    --arpa-residual-full-upload-threshold 0.25 \
+    --failure-prob 0 \
+    --seed ${seed}
+done
+```
+
+Interpretation rules:
+
+- If the no-DP upper bound remains below 0.70, the main bottleneck is model capacity, data partitioning, or training intensity rather than DP.
+- If no-DP is clearly above 0.70 and weak DP is close to no-DP, the model capacity is adequate and the formal-budget gap is mainly a DP-noise effect.
+- If weak DP is much better than strong DP, tune `dp-l2-norm-clip`, `dp-batch-size`, local epochs, and GRAIL-FL privacy scheduling before relaxing the formal main-table budget.
+- If GRAIL-FL is below fixed DP baselines in both weak and strong DP, reduce `arpa-privacy-boost-gain` and `arpa-max-privacy-boost` so budget utilization gains are not canceled by larger noise.
+- S2 diagnostics are only for choosing the formal configuration. The final main table must still use the same backbone, privacy budget, data split, and seed set across methods.
 
 Torch/GPU-GRAIL baseline commands for the four paper datasets:
 
