@@ -92,126 +92,120 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ### S2：模型容量与隐私强度诊断
 
-在继续正式主表实验前，应先用同一数据划分、同一客户端数和同一模型骨干做三组诊断。该阶段的目的不是生成论文主表，而是判断当前 `0.5-0.6` 精度主要来自模型容量不足、DP 噪声过强，还是 GRAIL-FL 调度策略。建议优先在 EMNIST balanced 上执行，若 FEMNIST 仍异常，再单独降低 FEMNIST 难度做补充诊断。
+在继续正式主表实验前，应先用同一数据划分、同一客户端数和同一模型骨干做三组诊断。该阶段的目的不是生成论文主表，而是判断当前 `0.5-0.6` 精度主要来自模型容量不足、DP 噪声过强，还是 GRAIL-FL 调度策略。为节省计算资源，S2 诊断阶段只使用一组随机种子，默认 `seed=42`；只有当某组配置表现合理并准备进入正式主表时，再扩展到 `42/43/44` 多随机种子。建议优先在 EMNIST balanced 上执行，若 FEMNIST 仍异常，再单独降低 FEMNIST 难度做补充诊断。
 
 诊断命名规则：
 
 | 诊断组 | 目的 | 方法 | 隐私预算 | 推荐前缀 |
 | --- | --- | --- | --- | --- |
-| no-DP 上限 | 判断 MLP 在当前 FL 划分下的可达上限 | `fedavg,fedprox` | 不使用客户端 DP | `s2_upper_${dataset}_seed${seed}` |
-| 弱 DP | 判断较宽松 DP 下是否接近 no-DP 上限 | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=20` | `s2_weakdp_${dataset}_seed${seed}` |
-| 强 DP | 判断正式预算下的可发表性能 | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=5` | `s2_strongdp_${dataset}_seed${seed}` |
+| no-DP 上限 | 判断 MLP 在当前 FL 划分下的可达上限 | `fedavg,fedprox` | 不使用客户端 DP | `s2_upper_${dataset}_seed42` |
+| 弱 DP | 判断较宽松 DP 下是否接近 no-DP 上限 | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=20` | `s2_weakdp_${dataset}_seed42` |
+| 强 DP | 判断正式预算下的可发表性能 | `dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl` | `epsilon_per_client_total=5` | `s2_strongdp_${dataset}_seed42` |
 
 no-DP 上限诊断：
 
 ```bash
-for seed in 42 43 44; do
-  python APDP-RTFL/main.py \
-    --experiment-suite baselines \
-    --methods fedavg,fedprox \
-    --run-name s2_upper_emnist_seed${seed} \
-    --dataset emnist \
-    --emnist-split balanced \
-    --num-clients 20 \
-    --num-rounds 200 \
-    --client-epochs 3 \
-    --partition dirichlet \
-    --dirichlet-alpha 0.5 \
-    --epsilon-per-client-total 5 \
-    --dp-batch-size 256 \
-    --torch-batch-size 256 \
-    --backend torch \
-    --device cuda \
-    --torch-model mlp \
-    --torch-mlp-hidden 256,128 \
-    --heterogeneity-profile regulated_generic \
-    --failure-prob 0 \
-    --seed ${seed}
-done
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods fedavg,fedprox \
+  --run-name s2_upper_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 5 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
 ```
 
 弱 DP 诊断：
 
 ```bash
-for seed in 42 43 44; do
-  python APDP-RTFL/main.py \
-    --experiment-suite baselines \
-    --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-    --run-name s2_weakdp_emnist_seed${seed} \
-    --dataset emnist \
-    --emnist-split balanced \
-    --num-clients 20 \
-    --num-rounds 200 \
-    --client-epochs 3 \
-    --partition dirichlet \
-    --dirichlet-alpha 0.5 \
-    --epsilon-per-client-total 20 \
-    --min-epsilon 0.1 \
-    --max-epsilon 4 \
-    --dp-epsilon 1 \
-    --dp-delta 1e-5 \
-    --dp-l2-norm-clip 1 \
-    --dp-batch-size 256 \
-    --torch-batch-size 256 \
-    --backend torch \
-    --device cuda \
-    --torch-model mlp \
-    --torch-mlp-hidden 256,128 \
-    --heterogeneity-profile regulated_generic \
-    --round-deadline-seconds 5 \
-    --reference-batch-seconds 0.01 \
-    --parameter-blocks 8 \
-    --upload-ratios 1.0,0.5,0.25 \
-    --arpa-privacy-boost-gain 0.5 \
-    --arpa-max-privacy-boost 1.5 \
-    --arpa-opportunity-compensation-weight 0.65 \
-    --arpa-compression-slack-target 0.85 \
-    --arpa-residual-full-upload-threshold 0.25 \
-    --failure-prob 0 \
-    --seed ${seed}
-done
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
+  --run-name s2_weakdp_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
 ```
 
 强 DP 诊断：
 
 ```bash
-for seed in 42 43 44; do
-  python APDP-RTFL/main.py \
-    --experiment-suite baselines \
-    --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-    --run-name s2_strongdp_emnist_seed${seed} \
-    --dataset emnist \
-    --emnist-split balanced \
-    --num-clients 20 \
-    --num-rounds 200 \
-    --client-epochs 3 \
-    --partition dirichlet \
-    --dirichlet-alpha 0.5 \
-    --epsilon-per-client-total 5 \
-    --min-epsilon 0.1 \
-    --max-epsilon 2 \
-    --dp-epsilon 1 \
-    --dp-delta 1e-5 \
-    --dp-l2-norm-clip 1 \
-    --dp-batch-size 256 \
-    --torch-batch-size 256 \
-    --backend torch \
-    --device cuda \
-    --torch-model mlp \
-    --torch-mlp-hidden 256,128 \
-    --heterogeneity-profile regulated_generic \
-    --round-deadline-seconds 5 \
-    --reference-batch-seconds 0.01 \
-    --parameter-blocks 8 \
-    --upload-ratios 1.0,0.5,0.25 \
-    --arpa-privacy-boost-gain 0.5 \
-    --arpa-max-privacy-boost 1.5 \
-    --arpa-opportunity-compensation-weight 0.65 \
-    --arpa-compression-slack-target 0.85 \
-    --arpa-residual-full-upload-threshold 0.25 \
-    --failure-prob 0 \
-    --seed ${seed}
-done
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
+  --run-name s2_strongdp_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 5 \
+  --min-epsilon 0.1 \
+  --max-epsilon 2 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
 ```
 
 解释规则：
