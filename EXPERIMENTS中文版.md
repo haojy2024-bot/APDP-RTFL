@@ -216,6 +216,234 @@ python APDP-RTFL/main.py \
 - 若 GRAIL-FL 在弱 DP 和强 DP 中都低于固定 DP 基线，应先降低 `arpa-privacy-boost-gain` 和 `arpa-max-privacy-boost`，避免预算利用率提升被更大噪声抵消。
 - S2 诊断结果只能用于选择正式实验配置；正式主表仍应使用同一模型骨干、同一隐私预算、同一数据划分和同一 seed 集。
 
+### S2.5：弱 DP 可训练性调参
+
+若 S2 出现 no-DP 上限已经超过 `0.70`，但弱 DP `epsilon=20` 仍低于 `0.60` 的情况，不要直接进入强 DP 诊断，也不要扩展到多随机种子。S2.5 只使用一组随机种子 `seed=42`，目标是在不改变数据集、客户端数、划分方式和模型骨干的前提下，判断弱 DP 低精度来自训练轮数不足、DP-SGD 裁剪过强、batch 太小，还是 GRAIL-FL 调度未触发。
+
+S2.5 的执行顺序如下：
+
+| 顺序 | 诊断 | 方法 | 关键改动 | 进入下一步条件 |
+| --- | --- | --- | --- | --- |
+| A | 补齐弱 DP 缺失方法 | `dp_fedsgd`、`dp_fednova` | 与 S2 弱 DP 完全一致，只单方法运行 | 得到完整 200 轮结果 |
+| B | 延长收敛诊断 | `dp_fedavg`、`grail_fl` | `num_rounds=400`，其他参数不变 | 最后 50 轮增益低于 `0.01` 或精度超过 `0.65` |
+| C | DP-SGD 小网格 | 先跑 `dp_fedavg`，再跑 `grail_fl` | 调 `dp_batch_size`、`dp_l2_norm_clip`、`client_epochs` | 至少一个配置达到 `0.65` |
+| D | GRAIL-FL 调度触发诊断 | `grail_fl` | 降低 deadline 或提高 reference batch，观察 partial upload | `compressed_selection_count > 0` 且精度不低于固定 DP 基线 |
+
+执行原则：
+
+- 每条命令仍只使用 `--seed 42`。
+- 每次只跑一个方法或一个配置，避免一次中断导致整批结果不可用。
+- 若 `dp_fedavg` 在 S2.5 仍低于 `0.60`，先不要继续强 DP；应检查 DP-SGD 实现、梯度裁剪和噪声记录。
+- 若 `dp_fedavg` 达到 `0.65-0.70`，再用同一配置跑 `grail_fl`。
+- 若 `grail_fl` 与固定 DP 基线精度相近，但在 epsilon 利用、deadline、上传比例或公平性指标上更优，可进入强 DP 单种子诊断。
+
+#### S2.5-A：补齐弱 DP 缺失方法
+
+先补跑 `dp_fedsgd`：
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedsgd \
+  --run-name s2_5_weakdp_dpfedsgd_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
+
+再补跑 `dp_fednova`：
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fednova \
+  --run-name s2_5_weakdp_dpfednova_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
+
+#### S2.5-B：延长弱 DP 收敛诊断
+
+若 S2 中最后 20 轮仍明显上升，先用 `num_rounds=400` 判断弱 DP 是否只是收敛较慢。建议先跑 `dp_fedavg`，若超过 `0.65`，再跑 `grail_fl`。
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_weakdp_dpfedavg_r400_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 400 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+#### S2.5-C：DP-SGD 小网格
+
+若 400 轮仍低于 `0.65`，先只用 `dp_fedavg` 做小网格，避免 GRAIL-FL 机制干扰。建议按下表逐条运行：
+
+| 配置名 | `num_rounds` | `client_epochs` | `dp_batch_size` | `torch_batch_size` | `dp_l2_norm_clip` | 目的 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `batch512_clip1_e3` | 200 | 3 | 512 | 512 | 1.0 | 降低 batch 平均噪声影响 |
+| `batch512_clip2_e3` | 200 | 3 | 512 | 512 | 2.0 | 判断裁剪是否过强 |
+| `batch512_clip05_e3` | 200 | 3 | 512 | 512 | 0.5 | 判断较小裁剪是否提升稳定性 |
+| `batch512_clip1_e5` | 200 | 5 | 512 | 512 | 1.0 | 增强本地训练强度 |
+| `batch512_clip2_e5` | 200 | 5 | 512 | 512 | 2.0 | 同时放宽裁剪并增强本地训练 |
+
+命令模板如下，每次只替换 `run-name`、`client-epochs`、`dp-batch-size`、`torch-batch-size` 与 `dp-l2-norm-clip`：
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_weakdp_dpfedavg_batch512_clip1_e3_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 512 \
+  --torch-batch-size 512 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+#### S2.5-D：GRAIL-FL 调度触发诊断
+
+若 S2.5-C 中找到较好的 DP-SGD 配置，再用同一配置跑 GRAIL-FL，并降低 deadline 使部分上传机制真实触发。先使用温和设置，避免过度压缩：
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods grail_fl \
+  --run-name s2_5_weakdp_grail_trigger_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 512 \
+  --torch-batch-size 512 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 1.5 \
+  --reference-batch-seconds 0.02 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S2.5 通过标准：
+
+- 弱 DP `dp_fedavg` 或 `grail_fl` 最终 accuracy 达到 `0.65` 以上，且 macro-F1 同步提升。
+- 平均最终 epsilon 接近 `20`，预算耗尽事件为 `0`。
+- GRAIL-FL 若参与比较，应至少满足 `compressed_selection_count > 0` 或在资源/隐私利用指标上能解释其机制贡献。
+- 通过后再进入强 DP 单种子诊断；未通过则优先检查 DP-SGD 噪声实现和裁剪统计。
+
 torch/GPU-GRAIL 四组论文数据集基线命令如下：
 
 ```bash

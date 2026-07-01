@@ -216,6 +216,234 @@ Interpretation rules:
 - If GRAIL-FL is below fixed DP baselines in both weak and strong DP, reduce `arpa-privacy-boost-gain` and `arpa-max-privacy-boost` so budget utilization gains are not canceled by larger noise.
 - S2 diagnostics are only for choosing the formal configuration. The final main table must still use the same backbone, privacy budget, data split, and seed set across methods.
 
+### S2.5: Weak-DP Trainability Tuning
+
+If S2 shows that the no-DP upper bound is already above `0.70` but weak DP with `epsilon=20` remains below `0.60`, do not move directly to strong-DP diagnostics and do not expand to multiple random seeds. S2.5 uses one random seed only, `seed=42`, and keeps the dataset, client count, partition, and model backbone fixed. Its purpose is to determine whether weak-DP underperformance comes from too few rounds, overly aggressive DP-SGD clipping, too small a batch size, or inactive GRAIL-FL scheduling.
+
+Run S2.5 in this order:
+
+| Order | Diagnostic | Methods | Key change | Move on when |
+| --- | --- | --- | --- | --- |
+| A | Complete missing weak-DP methods | `dp_fedsgd`, `dp_fednova` | Same as S2 weak DP, one method per run | Each method has a full 200-round result |
+| B | Longer convergence check | `dp_fedavg`, `grail_fl` | `num_rounds=400`, other parameters unchanged | Last-50-round gain is below `0.01` or accuracy exceeds `0.65` |
+| C | DP-SGD mini-grid | First `dp_fedavg`, then `grail_fl` | Tune `dp_batch_size`, `dp_l2_norm_clip`, and `client_epochs` | At least one configuration reaches `0.65` |
+| D | GRAIL-FL scheduling trigger | `grail_fl` | Lower deadline or raise reference batch to trigger partial upload | `compressed_selection_count > 0` and accuracy is not below fixed DP baselines |
+
+Execution rules:
+
+- Every command still uses only `--seed 42`.
+- Run one method or one configuration at a time so an interruption does not invalidate a whole batch.
+- If `dp_fedavg` remains below `0.60` in S2.5, do not continue to strong DP; inspect DP-SGD implementation, gradient clipping, and noise logging first.
+- If `dp_fedavg` reaches `0.65-0.70`, rerun `grail_fl` with the same configuration.
+- If `grail_fl` has similar accuracy to fixed DP baselines but better epsilon utilization, deadline behavior, upload ratio, or fairness metrics, proceed to strong-DP single-seed diagnostics.
+
+#### S2.5-A: Complete Missing Weak-DP Methods
+
+First run `dp_fedsgd`:
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedsgd \
+  --run-name s2_5_weakdp_dpfedsgd_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
+
+Then run `dp_fednova`:
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fednova \
+  --run-name s2_5_weakdp_dpfednova_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
+
+#### S2.5-B: Longer Weak-DP Convergence Check
+
+If the last 20 rounds in S2 are still improving, use `num_rounds=400` to check whether weak DP is simply converging slowly. Run `dp_fedavg` first; if it exceeds `0.65`, rerun `grail_fl`.
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_weakdp_dpfedavg_r400_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 400 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+#### S2.5-C: DP-SGD Mini-Grid
+
+If 400 rounds remain below `0.65`, run the mini-grid with `dp_fedavg` first to avoid mixing in GRAIL-FL mechanism effects. Run the rows one at a time:
+
+| Config | `num_rounds` | `client_epochs` | `dp_batch_size` | `torch_batch_size` | `dp_l2_norm_clip` | Purpose |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `batch512_clip1_e3` | 200 | 3 | 512 | 512 | 1.0 | Reduce batch-averaged noise impact |
+| `batch512_clip2_e3` | 200 | 3 | 512 | 512 | 2.0 | Check whether clipping is too aggressive |
+| `batch512_clip05_e3` | 200 | 3 | 512 | 512 | 0.5 | Check whether smaller clipping improves stability |
+| `batch512_clip1_e5` | 200 | 5 | 512 | 512 | 1.0 | Increase local training intensity |
+| `batch512_clip2_e5` | 200 | 5 | 512 | 512 | 2.0 | Relax clipping and increase local training together |
+
+Command template, replacing only `run-name`, `client-epochs`, `dp-batch-size`, `torch-batch-size`, and `dp-l2-norm-clip`:
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg \
+  --run-name s2_5_weakdp_dpfedavg_batch512_clip1_e3_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 512 \
+  --torch-batch-size 512 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --failure-prob 0 \
+  --seed 42
+```
+
+#### S2.5-D: GRAIL-FL Scheduling Trigger
+
+After finding a stronger DP-SGD configuration in S2.5-C, rerun GRAIL-FL with the same configuration and lower the deadline so partial upload actually triggers. Start with a mild setting to avoid excessive compression:
+
+```bash
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods grail_fl \
+  --run-name s2_5_weakdp_grail_trigger_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition dirichlet \
+  --dirichlet-alpha 0.5 \
+  --epsilon-per-client-total 20 \
+  --min-epsilon 0.1 \
+  --max-epsilon 4 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 1 \
+  --dp-batch-size 512 \
+  --torch-batch-size 512 \
+  --backend torch \
+  --device cuda \
+  --torch-model mlp \
+  --torch-mlp-hidden 256,128 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 1.5 \
+  --reference-batch-seconds 0.02 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.5 \
+  --arpa-max-privacy-boost 1.5 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
+```
+
+S2.5 pass criteria:
+
+- Weak-DP `dp_fedavg` or `grail_fl` final accuracy is above `0.65`, with macro-F1 improving as well.
+- Average final epsilon is close to `20`, with `0` budget-exhausted events.
+- If GRAIL-FL is included, it should have `compressed_selection_count > 0` or a clear mechanism advantage in resource/privacy-utilization metrics.
+- Only after passing S2.5 should you run strong-DP single-seed diagnostics; otherwise inspect DP-SGD noise implementation and clipping statistics first.
+
 Torch/GPU-GRAIL baseline commands for the four paper datasets:
 
 ```bash
