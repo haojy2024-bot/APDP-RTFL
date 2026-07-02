@@ -12,7 +12,7 @@ Each timestamped run directory is write-once: an existing final directory is rej
 
 ## Common Formal Setting
 
-The following is a starting protocol for a formal EMNIST experiment. It intentionally uses a non-IID partition and a fixed random seed. Repeat each formal command with at least three seeds, such as `42`, `43`, and `44`, and report mean plus standard deviation.
+The following is a starting protocol for a formal EMNIST experiment. The current paper main-table protocol uses one seed to save compute, fixed at `seed=42`. If time later allows, key conclusions can be rerun as a multi-seed robustness check, but the main-table commands in this guide no longer run `42/43/44` by default.
 
 ```powershell
 --dataset emnist --emnist-split balanced --num-clients 20 --num-rounds 200 --client-epochs 3 --partition dirichlet --dirichlet-alpha 0.5 --epsilon-per-client-total 5 --min-epsilon 0.1 --max-epsilon 2 --dp-epsilon 1 --dp-delta 1e-5 --dp-l2-norm-clip 1 --backend sklearn --seed 42
@@ -687,86 +687,52 @@ S3 decision rules:
 - If no-DP CNN reaches `0.88-0.90`, rerun DP-FedAvg and GRAIL-FL with the same backbone.
 - CNN will significantly increase training time, especially with per-sample DP-SGD clipping, so S3 must start with no-DP short-run upper-bound probes.
 
-Torch/GPU-GRAIL baseline commands for the four paper datasets:
+The DP-CNN five-method main-table command is:
 
-Note: `--epsilon-per-client-total 5` below is a tight-budget reference value. If S2.5-C3 selects `50` or `80` as the formal utility-first budget, replace `--epsilon-per-client-total`, `--min-epsilon`, `--max-epsilon`, `--dp-l2-norm-clip`, and `--client-epochs` consistently across all formal baseline, participation, fairness, contribution, audit, and ablation commands.
-
-```bash
-for dataset in emnist femnist cifar10 medmnist; do
-  for seed in 42 43 44; do
-    python APDP-RTFL/main.py \
-      --experiment-suite baselines \
-      --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-      --run-name grail_main_${dataset}_seed${seed} \
-      --dataset ${dataset} \
-      --emnist-split balanced \
-      --num-clients 20 \
-      --num-rounds 200 \
-      --client-epochs 3 \
-      --partition dirichlet \
-      --dirichlet-alpha 0.5 \
-      --epsilon-per-client-total 5 \
-      --min-epsilon 0.1 \
-      --max-epsilon 2 \
-      --dp-epsilon 1 \
-      --dp-delta 1e-5 \
-      --dp-l2-norm-clip 1 \
-      --dp-batch-size 256 \
-      --torch-batch-size 256 \
-      --backend torch \
-      --device cuda \
-      --heterogeneity-profile regulated_generic \
-      --round-deadline-seconds 5 \
-      --reference-batch-seconds 0.01 \
-      --parameter-blocks 8 \
-      --upload-ratios 1.0,0.5,0.25 \
-      --arpa-privacy-boost-gain 0.8 \
-      --arpa-max-privacy-boost 1.8 \
-      --arpa-opportunity-compensation-weight 0.65 \
-      --arpa-compression-slack-target 0.85 \
-      --arpa-residual-full-upload-threshold 0.25 \
-      --seed ${seed}
-  done
-done
-```
-
-CUDA is an experimental execution backend, not a claim that all real edge clients have GPUs. Resource heterogeneity remains controlled by the regulated resource profile and deadline simulation. The sklearn/GRAIL command below remains available as a CPU-compatible reference path for backend consistency checks.
+The calibrated unified configuration is CNN 32/64 + FC256, SGD Momentum, `learning_rate=0.02`, `epsilon_per_client_total=300`, `dp_l2_norm_clip=2.0`, `num_rounds=200`, and `seed=42`. This comes from S4-C1, where EMNIST balanced / IID exceeded 0.80 accuracy and converged around 200 rounds. The paper table header and text must report this privacy budget and optimizer configuration.
 
 ```bash
-for dataset in emnist femnist cifar10 medmnist; do
-  for seed in 42 43 44; do
-    python APDP-RTFL/main.py \
-      --experiment-suite baselines \
-      --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-      --run-name grail_main_${dataset}_seed${seed} \
-      --dataset ${dataset} \
-      --emnist-split balanced \
-      --num-clients 20 \
-      --num-rounds 200 \
-      --client-epochs 3 \
-      --partition dirichlet \
-      --dirichlet-alpha 0.5 \
-      --epsilon-per-client-total 5 \
-      --min-epsilon 0.1 \
-      --max-epsilon 2 \
-      --dp-epsilon 1 \
-      --dp-delta 1e-5 \
-      --dp-l2-norm-clip 1 \
-      --backend sklearn \
-      --heterogeneity-profile regulated_generic \
-      --round-deadline-seconds 5 \
-      --reference-batch-seconds 0.01 \
-      --parameter-blocks 8 \
-      --upload-ratios 1.0,0.5,0.25 \
-      --arpa-privacy-boost-gain 0.8 \
-      --arpa-max-privacy-boost 1.8 \
-      --arpa-opportunity-compensation-weight 0.65 \
-      --arpa-compression-slack-target 0.85 \
-      --arpa-residual-full-upload-threshold 0.25 \
-      --seed ${seed}
-  done
-done
+python APDP-RTFL/main.py \
+  --experiment-suite baselines \
+  --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
+  --run-name grail_main_dpcnn_emnist_seed42 \
+  --dataset emnist \
+  --emnist-split balanced \
+  --num-clients 20 \
+  --num-rounds 200 \
+  --client-epochs 3 \
+  --partition iid \
+  --epsilon-per-client-total 300 \
+  --min-epsilon 0.1 \
+  --max-epsilon 2 \
+  --dp-epsilon 1 \
+  --dp-delta 1e-5 \
+  --dp-l2-norm-clip 2.0 \
+  --dp-batch-size 256 \
+  --torch-batch-size 256 \
+  --backend torch \
+  --device cuda \
+  --torch-model cnn \
+  --torch-cnn-channels 32,64 \
+  --torch-cnn-fc 256 \
+  --torch-optimizer sgd_momentum \
+  --learning-rate 0.02 \
+  --torch-momentum 0.9 \
+  --heterogeneity-profile regulated_generic \
+  --round-deadline-seconds 5 \
+  --reference-batch-seconds 0.01 \
+  --parameter-blocks 8 \
+  --upload-ratios 1.0,0.5,0.25 \
+  --arpa-privacy-boost-gain 0.8 \
+  --arpa-max-privacy-boost 1.8 \
+  --arpa-opportunity-compensation-weight 0.65 \
+  --arpa-compression-slack-target 0.85 \
+  --arpa-residual-full-upload-threshold 0.25 \
+  --failure-prob 0 \
+  --seed 42
 ```
+
+CUDA is an experimental execution backend, not a claim that all real edge clients have GPUs. Resource heterogeneity remains controlled by the regulated resource profile and deadline simulation. Because the formal main table now uses DP-CNN, the old sklearn/GRAIL linear-model command is retained only as a historical audit path, not as the final main-table command.
 
 Key outputs are `baseline_final_metrics.csv`, `baseline_summary.csv`, `baseline_comparison.png`, and `baseline_method_metadata.csv`. The metadata file is the code-side record for the comparison table:
 
@@ -896,11 +862,11 @@ Do not report ablation only by final accuracy. Also report tier-level epsilon ut
 | Traceability | `audit_trace` | Audit events, verified links, invalid links, per-round audit fields |
 | Mechanism necessity | `ablation` | Full-versus-removed-component performance deltas |
 
-Before pooling seeds, retain each raw run directory. Aggregate only the relevant final-metric CSV files into a separate analysis table; never overwrite raw audit, regulatory, or pollution logs.
+Before aggregating, retain each raw run directory. Aggregate only the relevant final-metric CSV files into a separate analysis table; never overwrite raw audit, regulatory, or pollution logs. The current main table uses seed42 only, so `std` columns are script-format compatibility fields and should not be interpreted as multi-seed robustness.
 
-## 8. Multi-Seed Aggregation And Paper Tables
+## 8. Seed42 Aggregation And Paper Tables
 
-Run each formal command once per dataset and seed, keeping a stable prefix pattern. For the new GRAIL-FL main baseline, use names such as `grail_main_emnist_seed42`, `grail_main_femnist_seed42`, `grail_main_cifar10_seed42`, and `grail_main_medmnist_seed42`; the runner appends timestamps automatically. Do not reuse old APDP result prefixes when preparing the final paper table.
+Run each formal command with `seed=42`, keeping a stable prefix pattern. For the new DP-CNN/GRAIL-FL main baseline, use names such as `grail_main_dpcnn_emnist_seed42`; the runner appends timestamps automatically. Do not reuse old APDP result prefixes when preparing the final paper table.
 
 Aggregate raw baseline directories without modifying them:
 
@@ -908,7 +874,7 @@ Aggregate raw baseline directories without modifying them:
 for dataset in emnist femnist cifar10 medmnist; do
   python APDP-RTFL/aggregate_results.py \
     --input-root results \
-    --run-pattern grail_main_${dataset}_seed* \
+    --run-pattern grail_main_dpcnn_${dataset}_seed42* \
     --input-file baseline_final_metrics.csv \
     --output-dir results/grail_main_${dataset}_aggregate \
     --title-prefix "${dataset} DP Baselines with GRAIL-FL"
@@ -919,9 +885,9 @@ The aggregator creates three CSV files:
 
 | Output file | Use |
 | --- | --- |
-| `experiment_seed_metrics.csv` | One method row per raw run, including the seed inferred from its directory name. Use for traceability and statistical checks. |
-| `experiment_metric_summary.csv` | Long-form `method-metric-mean-std-n` summary for plotting or supplementary material. |
-| `experiment_paper_main_table.csv` | Wide-format table with `<metric>_mean`, `<metric>_std`, and `<metric>_n` columns. Use as the source for the primary results table. |
+| `experiment_seed_metrics.csv` | One method row per raw run, including the seed inferred from its directory name. The current main table should only contain seed42. |
+| `experiment_metric_summary.csv` | Long-form `method-metric-mean-std-n` summary; under one seed, `std` is not robustness evidence. |
+| `experiment_paper_main_table.csv` | Wide-format table with `<metric>_mean`, `<metric>_std`, and `<metric>_n` columns; under one seed, mainly use mean/n. |
 
 It also creates `aggregate_<metric>.png` files with mean plus sample-standard-deviation error bars. For another suite, point `--input-file` at its own final metrics file, for example `pollution_final_metrics.csv`, `ablation_final_metrics.csv`, or `privacy_sensitivity_final_metrics.csv`, and use a separate aggregate output directory.
 
@@ -931,7 +897,7 @@ GRAIL-FL resource-tier diagnostics require a separate aggregation pass. The scri
 for dataset in emnist femnist cifar10 medmnist; do
   python APDP-RTFL/aggregate_arpa_diagnostics.py \
     --input-root results \
-    --run-pattern grail_main_${dataset}_seed* \
+    --run-pattern grail_main_dpcnn_${dataset}_seed42* \
     --output-dir results/grail_${dataset}_diagnostics_aggregate \
     --title-prefix "${dataset} GRAIL-FL Diagnostics"
 done
@@ -943,7 +909,7 @@ For formal acceptance, add `--require-complete` so any run missing `tier_privacy
 for dataset in emnist femnist cifar10 medmnist; do
   python APDP-RTFL/aggregate_arpa_diagnostics.py \
     --input-root results \
-    --run-pattern grail_main_${dataset}_seed* \
+    --run-pattern grail_main_dpcnn_${dataset}_seed42* \
     --require-complete \
     --output-dir results/grail_${dataset}_diagnostics_aggregate_strict \
     --title-prefix "${dataset} GRAIL-FL Diagnostics"
@@ -966,7 +932,7 @@ Default diagnostics include `avg_epsilon_utilization`, `avg_historical_success_r
 for dataset in emnist femnist cifar10 medmnist; do
   python APDP-RTFL/aggregate_arpa_diagnostics.py \
     --input-root results \
-    --run-pattern grail_main_${dataset}_seed* \
+    --run-pattern grail_main_dpcnn_${dataset}_seed42* \
     --metrics avg_epsilon_utilization,avg_historical_success_rate,avg_upload_ratio,residual_feedback_full_upload_count \
     --output-dir results/grail_${dataset}_diagnostics_core \
     --title-prefix "${dataset} GRAIL-FL Core Diagnostics"
