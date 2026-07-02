@@ -72,6 +72,12 @@ def parse_args():
                         help="Torch device for --backend torch: auto, cpu, cuda, or cuda:0.")
     parser.add_argument("--torch-batch-size", type=int, default=256,
                         help="Mini-batch size for the torch backend.")
+    parser.add_argument("--learning-rate", type=float, default=BASE_LEARNING_RATE,
+                        help="Local learning rate for torch clients. Default preserves historical behavior: 0.01.")
+    parser.add_argument("--torch-optimizer", default="sgd", choices=["sgd", "sgd_momentum", "adam"],
+                        help="Local optimizer for torch clients. DP-SGD applies it after clipping and noise as post-processing.")
+    parser.add_argument("--torch-momentum", type=float, default=0.9,
+                        help="Momentum used by --torch-optimizer sgd_momentum.")
     parser.add_argument("--torch-model", default="linear", choices=["linear", "mlp", "cnn"],
                         help="Torch model backbone. linear preserves historical softmax regression; mlp uses a small fully connected network; cnn uses a compact image CNN.")
     parser.add_argument("--torch-mlp-hidden", default="256,128",

@@ -711,7 +711,7 @@ def _init_backend_clients(train_val_data, num_features, classes, args, privacy_c
                 device,
                 X_val=X_val,
                 y_val=y_val,
-                learning_rate=BASE_LEARNING_RATE,
+                learning_rate=getattr(args, "learning_rate", BASE_LEARNING_RATE),
                 batch_size=args.torch_batch_size,
                 random_state=args.seed + i,
                 privacy_config=privacy_config,
@@ -719,6 +719,8 @@ def _init_backend_clients(train_val_data, num_features, classes, args, privacy_c
                 mlp_hidden=_parse_mlp_hidden(getattr(args, "torch_mlp_hidden", "256,128")),
                 cnn_channels=_parse_cnn_channels(getattr(args, "torch_cnn_channels", "16,32")),
                 cnn_fc=getattr(args, "torch_cnn_fc", 128),
+                torch_optimizer=getattr(args, "torch_optimizer", "sgd"),
+                torch_momentum=getattr(args, "torch_momentum", 0.9),
             )
         )
     return clients, "torch", device

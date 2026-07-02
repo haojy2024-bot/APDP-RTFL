@@ -56,6 +56,8 @@ class TorchLinearClient:
         mlp_hidden=(256, 128),
         cnn_channels=(16, 32),
         cnn_fc=128,
+        torch_optimizer="sgd",
+        torch_momentum=0.9,
     ):
         self.client_id = client_id
         self.X_train = np.asarray(X_train, dtype=np.float32)
@@ -70,6 +72,8 @@ class TorchLinearClient:
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.random_state = random_state
+        self.torch_optimizer = torch_optimizer
+        self.torch_momentum = float(torch_momentum)
         self.model_type = model_type
         self.mlp_hidden = tuple(int(v) for v in mlp_hidden)
         self.cnn_channels = tuple(int(v) for v in cnn_channels)
@@ -252,6 +256,36 @@ class TorchLinearClient:
         proof = self.zkip.generate_proof(delta)
         return delta, proof
 
+    def _make_manual_optimizer_state(self):
+        state = {}
+        if self.torch_optimizer in {"sgd_momentum", "adam"}:
+            for name, param in self.model.named_parameters():
+                state[name] = {"m": torch.zeros_like(param)}
+                if self.torch_optimizer == "adam":
+                    state[name]["v"] = torch.zeros_like(param)
+        return {"step": 0, "state": state}
+
+    def _apply_manual_optimizer_step(self, param, name, grad_update, opt_state):
+        if self.torch_optimizer == "sgd":
+            param -= self.learning_rate * grad_update
+            return
+        if self.torch_optimizer == "sgd_momentum":
+            state = opt_state["state"][name]
+            state["m"].mul_(self.torch_momentum).add_(grad_update)
+            param -= self.learning_rate * state["m"]
+            return
+        if self.torch_optimizer == "adam":
+            beta1, beta2 = 0.9, 0.999
+            state = opt_state["state"][name]
+            state["m"].mul_(beta1).add_(grad_update, alpha=1.0 - beta1)
+            state["v"].mul_(beta2).addcmul_(grad_update, grad_update, value=1.0 - beta2)
+            step = max(1, int(opt_state["step"]))
+            m_hat = state["m"] / (1.0 - beta1 ** step)
+            v_hat = state["v"] / (1.0 - beta2 ** step)
+            param -= self.learning_rate * m_hat / (torch.sqrt(v_hat) + 1e-8)
+            return
+        raise ValueError(f"Unsupported torch optimizer: {self.torch_optimizer}")
+
     def _train_functional_model_with_dp_sgd(self, global_params, X, y, epochs, fedprox_mu, generator, noise_std):
         try:
             from torch.func import functional_call, grad, vmap
@@ -271,9 +305,11 @@ class TorchLinearClient:
 
         grad_one = grad(loss_one)
         grad_many = vmap(grad_one, in_dims=(None, 0, 0))
+        opt_state = self._make_manual_optimizer_state()
 
         for _ in range(int(epochs)):
             for _ in range(int(np.ceil(len(self.y_train) / batch_size))):
+                opt_state["step"] += 1
                 selected = torch.rand(len(self.y_train), device=self.device, generator=generator) < sample_rate
                 if not bool(selected.any().item()):
                     selected[torch.randint(len(self.y_train), (1,), device=self.device, generator=generator)] = True
@@ -303,7 +339,7 @@ class TorchLinearClient:
                         update = clipped_mean + noise
                         if fedprox_mu > 0:
                             update = update + fedprox_mu * (param - global_tensors[name])
-                        param -= self.learning_rate * update
+                        self._apply_manual_optimizer_step(param, name, update, opt_state)
 
         current_params = self.model_parameters()
         delta = {key: current_params[key] - global_params[key] for key in current_params}
@@ -331,7 +367,7 @@ class TorchLinearClient:
         }
         X = torch.tensor(self.X_train, dtype=torch.float32, device=self.device)
         y = torch.tensor(self._encode_y(self.y_train), dtype=torch.long, device=self.device)
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
+        optimizer = self._build_torch_optimizer()
         generator = torch.Generator()
         generator.manual_seed(self.random_state)
 
@@ -357,6 +393,19 @@ class TorchLinearClient:
             delta = self._apply_differential_privacy(delta)
         proof = self.zkip.generate_proof(delta)
         return delta, proof
+
+    def _build_torch_optimizer(self):
+        if self.torch_optimizer == "sgd":
+            return torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
+        if self.torch_optimizer == "sgd_momentum":
+            return torch.optim.SGD(
+                self.model.parameters(),
+                lr=self.learning_rate,
+                momentum=self.torch_momentum,
+            )
+        if self.torch_optimizer == "adam":
+            return torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        raise ValueError(f"Unsupported torch optimizer: {self.torch_optimizer}")
 
 
 def _initial_params(num_features, n_classes):
@@ -527,7 +576,7 @@ def _init_torch_clients(train_val_data, num_features, classes, device, args, pri
                 device,
                 X_val=X_val,
                 y_val=y_val,
-                learning_rate=BASE_LEARNING_RATE,
+                learning_rate=getattr(args, "learning_rate", BASE_LEARNING_RATE),
                 batch_size=args.torch_batch_size,
                 random_state=args.seed + i,
                 privacy_config=privacy_config,
@@ -535,6 +584,8 @@ def _init_torch_clients(train_val_data, num_features, classes, device, args, pri
                 mlp_hidden=_parse_mlp_hidden(getattr(args, "torch_mlp_hidden", "256,128")),
                 cnn_channels=_parse_cnn_channels(getattr(args, "torch_cnn_channels", "16,32")),
                 cnn_fc=getattr(args, "torch_cnn_fc", 128),
+                torch_optimizer=getattr(args, "torch_optimizer", "sgd"),
+                torch_momentum=getattr(args, "torch_momentum", 0.9),
             )
         )
     return clients
@@ -789,7 +840,9 @@ def run_torch_baseline_suite(args, output_dir):
         f"Torch model: {getattr(args, 'torch_model', 'linear')}; "
         f"mlp_hidden={getattr(args, 'torch_mlp_hidden', '256,128')}; "
         f"cnn_channels={getattr(args, 'torch_cnn_channels', '16,32')}; "
-        f"cnn_fc={getattr(args, 'torch_cnn_fc', 128)}"
+        f"cnn_fc={getattr(args, 'torch_cnn_fc', 128)}; "
+        f"optimizer={getattr(args, 'torch_optimizer', 'sgd')}; "
+        f"learning_rate={getattr(args, 'learning_rate', BASE_LEARNING_RATE)}"
     )
     print(f"Results will be saved to: {output_dir}")
     print(
