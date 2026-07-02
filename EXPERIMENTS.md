@@ -689,47 +689,51 @@ S3 decision rules:
 
 The DP-CNN five-method main-table command is:
 
-The calibrated unified configuration is CNN 32/64 + FC256, SGD Momentum, `learning_rate=0.02`, `epsilon_per_client_total=300`, `dp_l2_norm_clip=2.0`, `num_rounds=200`, and `seed=42`. This comes from S4-C1, where EMNIST balanced / IID exceeded 0.80 accuracy and converged around 200 rounds. The paper table header and text must report this privacy budget and optimizer configuration.
+The calibrated unified configuration is CNN 32/64 + FC256, SGD Momentum, `learning_rate=0.02`, `epsilon_per_client_total=300`, `dp_l2_norm_clip=2.0`, `num_rounds=200`, and `seed=42`. This configuration comes from S4-C1 trainability calibration; the formal paper main table must evaluate non-IID data heterogeneity, so it uniformly uses `--partition dirichlet --dirichlet-alpha 1.0`. The paper table header and text must report this privacy budget, optimizer configuration, and non-IID partition strength.
 
 ```bash
-python APDP-RTFL/main.py \
-  --experiment-suite baselines \
-  --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-  --run-name grail_main_dpcnn_emnist_seed42 \
-  --dataset emnist \
-  --emnist-split balanced \
-  --num-clients 20 \
-  --num-rounds 200 \
-  --client-epochs 3 \
-  --partition iid \
-  --epsilon-per-client-total 300 \
-  --min-epsilon 0.1 \
-  --max-epsilon 2 \
-  --dp-epsilon 1 \
-  --dp-delta 1e-5 \
-  --dp-l2-norm-clip 2.0 \
-  --dp-batch-size 256 \
-  --torch-batch-size 256 \
-  --backend torch \
-  --device cuda \
-  --torch-model cnn \
-  --torch-cnn-channels 32,64 \
-  --torch-cnn-fc 256 \
-  --torch-optimizer sgd_momentum \
-  --learning-rate 0.02 \
-  --torch-momentum 0.9 \
-  --heterogeneity-profile regulated_generic \
-  --round-deadline-seconds 5 \
-  --reference-batch-seconds 0.01 \
-  --parameter-blocks 8 \
-  --upload-ratios 1.0,0.5,0.25 \
-  --arpa-privacy-boost-gain 0.8 \
-  --arpa-max-privacy-boost 1.8 \
-  --arpa-opportunity-compensation-weight 0.65 \
-  --arpa-compression-slack-target 0.85 \
-  --arpa-residual-full-upload-threshold 0.25 \
-  --failure-prob 0 \
-  --seed 42
+for dataset in emnist cifar10 medmnist femnist; do
+  python APDP-RTFL/main.py \
+    --experiment-suite baselines \
+    --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
+    --run-name grail_main_dpcnn_${dataset}_seed42 \
+    --dataset ${dataset} \
+    --emnist-split balanced \
+    --num-clients 20 \
+    --num-rounds 200 \
+    --client-epochs 3 \
+    --partition dirichlet \
+    --dirichlet-alpha 1.0 \
+    --epsilon-per-client-total 300 \
+    --min-epsilon 0.1 \
+    --max-epsilon 2 \
+    --dp-epsilon 1 \
+    --dp-delta 1e-5 \
+    --dp-l2-norm-clip 2.0 \
+    --dp-batch-size 256 \
+    --torch-batch-size 256 \
+    --backend torch \
+    --device cuda \
+    --torch-model cnn \
+    --torch-cnn-channels 32,64 \
+    --torch-cnn-fc 256 \
+    --torch-optimizer sgd_momentum \
+    --learning-rate 0.02 \
+    --torch-momentum 0.9 \
+    --heterogeneity-profile regulated_generic \
+    --round-deadline-seconds 5 \
+    --reference-batch-seconds 0.01 \
+    --parameter-blocks 8 \
+    --upload-ratios 1.0,0.5,0.25 \
+    --arpa-privacy-boost-gain 0.8 \
+    --arpa-max-privacy-boost 1.8 \
+    --arpa-opportunity-compensation-weight 0.65 \
+    --arpa-compression-slack-target 0.85 \
+    --arpa-residual-full-upload-threshold 0.25 \
+    --failure-prob 0 \
+    --output-root results_main_dpcnn \
+    --seed 42
+done
 ```
 
 CUDA is an experimental execution backend, not a claim that all real edge clients have GPUs. Resource heterogeneity remains controlled by the regulated resource profile and deadline simulation. Because the formal main table now uses DP-CNN, the old sklearn/GRAIL linear-model command is retained only as a historical audit path, not as the final main-table command.

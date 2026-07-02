@@ -687,47 +687,51 @@ S3 判断规则：
 - 若 no-DP CNN 达到 `0.88-0.90`，再用同一骨干运行 DP-FedAvg 和 GRAIL-FL。
 - CNN 会显著增加训练时间，尤其是 DP-SGD 逐样本梯度裁剪，因此 S3 必须先做 no-DP 小轮数上限探测。
 
-DP-CNN 主表五方法命令如下。当前校准后的统一配置为：CNN 32/64 + FC256、SGD Momentum、`learning_rate=0.02`、`epsilon_per_client_total=300`、`dp_l2_norm_clip=2.0`、`num_rounds=200`、`seed=42`。该配置来自 S4-C1，在 EMNIST balanced / IID 设置下已经达到 0.80 以上并在 200 轮附近收敛。论文表头和正文必须明确报告该隐私预算与优化器配置。
+DP-CNN 主表五方法命令如下。当前校准后的统一配置为：CNN 32/64 + FC256、SGD Momentum、`learning_rate=0.02`、`epsilon_per_client_total=300`、`dp_l2_norm_clip=2.0`、`num_rounds=200`、`seed=42`。该配置来自 S4-C1 的可训练性校准；正式论文主表必须在 non-IID 数据异质性下评估，因此统一采用 `--partition dirichlet --dirichlet-alpha 1.0`。论文表头和正文必须明确报告该隐私预算、优化器配置和 non-IID 划分强度。
 
 ```bash
-python APDP-RTFL/main.py \
-  --experiment-suite baselines \
-  --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
-  --run-name grail_main_dpcnn_emnist_seed42 \
-  --dataset emnist \
-  --emnist-split balanced \
-  --num-clients 20 \
-  --num-rounds 200 \
-  --client-epochs 3 \
-  --partition iid \
-  --epsilon-per-client-total 300 \
-  --min-epsilon 0.1 \
-  --max-epsilon 2 \
-  --dp-epsilon 1 \
-  --dp-delta 1e-5 \
-  --dp-l2-norm-clip 2.0 \
-  --dp-batch-size 256 \
-  --torch-batch-size 256 \
-  --backend torch \
-  --device cuda \
-  --torch-model cnn \
-  --torch-cnn-channels 32,64 \
-  --torch-cnn-fc 256 \
-  --torch-optimizer sgd_momentum \
-  --learning-rate 0.02 \
-  --torch-momentum 0.9 \
-  --heterogeneity-profile regulated_generic \
-  --round-deadline-seconds 5 \
-  --reference-batch-seconds 0.01 \
-  --parameter-blocks 8 \
-  --upload-ratios 1.0,0.5,0.25 \
-  --arpa-privacy-boost-gain 0.8 \
-  --arpa-max-privacy-boost 1.8 \
-  --arpa-opportunity-compensation-weight 0.65 \
-  --arpa-compression-slack-target 0.85 \
-  --arpa-residual-full-upload-threshold 0.25 \
-  --failure-prob 0 \
-  --seed 42
+for dataset in emnist cifar10 medmnist femnist; do
+  python APDP-RTFL/main.py \
+    --experiment-suite baselines \
+    --methods dp_fedavg,dp_fedprox,dp_fedsgd,dp_fednova,grail_fl \
+    --run-name grail_main_dpcnn_${dataset}_seed42 \
+    --dataset ${dataset} \
+    --emnist-split balanced \
+    --num-clients 20 \
+    --num-rounds 200 \
+    --client-epochs 3 \
+    --partition dirichlet \
+    --dirichlet-alpha 1.0 \
+    --epsilon-per-client-total 300 \
+    --min-epsilon 0.1 \
+    --max-epsilon 2 \
+    --dp-epsilon 1 \
+    --dp-delta 1e-5 \
+    --dp-l2-norm-clip 2.0 \
+    --dp-batch-size 256 \
+    --torch-batch-size 256 \
+    --backend torch \
+    --device cuda \
+    --torch-model cnn \
+    --torch-cnn-channels 32,64 \
+    --torch-cnn-fc 256 \
+    --torch-optimizer sgd_momentum \
+    --learning-rate 0.02 \
+    --torch-momentum 0.9 \
+    --heterogeneity-profile regulated_generic \
+    --round-deadline-seconds 5 \
+    --reference-batch-seconds 0.01 \
+    --parameter-blocks 8 \
+    --upload-ratios 1.0,0.5,0.25 \
+    --arpa-privacy-boost-gain 0.8 \
+    --arpa-max-privacy-boost 1.8 \
+    --arpa-opportunity-compensation-weight 0.65 \
+    --arpa-compression-slack-target 0.85 \
+    --arpa-residual-full-upload-threshold 0.25 \
+    --failure-prob 0 \
+    --output-root results_main_dpcnn \
+    --seed 42
+done
 ```
 
 CUDA 是实验加速后端，不表示真实边缘客户端都具备 GPU。资源异构仍由 regulated resource profile 与 deadline simulation 控制。由于正式主表已采用 DP-CNN，旧的 sklearn/GRAIL 线性模型命令仅保留为历史复核路径，不再作为最终主表命令。
